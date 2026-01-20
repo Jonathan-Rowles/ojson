@@ -3,6 +3,7 @@ package generate
 import "core:flags"
 import "core:fmt"
 import "core:os"
+import fp "core:path/filepath"
 
 Options :: struct {
 	path:         string `args:"pos=0,required" usage:"Path to scan (file or directory)"`,
@@ -14,8 +15,8 @@ Options :: struct {
 
 main :: proc() {
 	opts: Options
-	opts.output = "unmarshal.gen.odin"
-	opts.package_name = "json"
+	opts.output = "gen/unmarshal.gen.odin"
+	opts.package_name = "gen"
 
 	flags.parse_or_exit(&opts, os.args, .Unix)
 
@@ -45,9 +46,11 @@ main :: proc() {
 	}
 
 	all_structs := make([dynamic]Struct_Info)
+	output_dir := fp.dir(opts.output)
+	abs_output_dir, _ := fp.abs(output_dir)
 
 	for file in files {
-		structs, parse_ok := parse_file(file)
+		structs, pkg_name, parse_ok := parse_file(file)
 		if !parse_ok {
 			if opts.verbose {
 				fmt.eprintfln("Warning: Could not parse: %s", file)
@@ -55,9 +58,21 @@ main :: proc() {
 			continue
 		}
 
-		for info in structs {
+		abs_file, _ := fp.abs(file)
+		source_dir := fp.dir(abs_file)
+
+		for &info in structs {
+			info.source_file = file
+			info.source_package = pkg_name
+			info.source_dir = source_dir
+
 			if opts.verbose {
-				fmt.printfln("  Found struct: %s (%d fields)", info.name, len(info.fields))
+				fmt.printfln(
+					"  Found struct: %s (%d fields) in package %s",
+					info.name,
+					len(info.fields),
+					pkg_name,
+				)
 			}
 			append(&all_structs, info)
 		}
@@ -72,7 +87,18 @@ main :: proc() {
 		fmt.printfln("Total structs found: %d", len(all_structs))
 	}
 
-	code := generate_code(all_structs[:], opts.package_name)
+	cwd := os.get_current_directory()
+	ojson_import, _ := fp.rel(abs_output_dir, cwd)
+
+	if opts.verbose {
+		fmt.printfln("Ojson import: %s", ojson_import)
+	}
+
+	code := generate_code(all_structs[:], opts.package_name, abs_output_dir, ojson_import)
+
+	if output_dir != "" && output_dir != "." {
+		os.make_directory(output_dir)
+	}
 
 	write_ok := os.write_entire_file(opts.output, transmute([]byte)code)
 	if !write_ok {

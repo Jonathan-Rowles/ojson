@@ -5,20 +5,19 @@ import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 
-parse_file :: proc(
+get_package_name :: proc(
 	file_path: string,
 	allocator := context.allocator,
 ) -> (
-	structs: [dynamic]Struct_Info,
+	name: string,
 	ok: bool,
 ) {
-	structs = make([dynamic]Struct_Info, allocator)
-
 	data, read_ok := os.read_entire_file(file_path, allocator)
 	if !read_ok {
-		return structs, false
+		return "", false
 	}
 
 	NO_POS :: tokenizer.Pos{}
@@ -31,8 +30,45 @@ parse_file :: proc(
 	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
 
 	if !parser.parse_file(&p, file) {
-		return structs, false
+		return "", false
 	}
+
+	if file.pkg_name != "" {
+		return strings.clone(file.pkg_name, allocator), true
+	}
+
+	return "", false
+}
+
+parse_file :: proc(
+	file_path: string,
+	allocator := context.allocator,
+) -> (
+	structs: [dynamic]Struct_Info,
+	pkg_name: string,
+	ok: bool,
+) {
+	structs = make([dynamic]Struct_Info, allocator)
+
+	data, read_ok := os.read_entire_file(file_path, allocator)
+	if !read_ok {
+		return structs, "", false
+	}
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = string(data)
+	file.fullpath = file_path
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	if !parser.parse_file(&p, file) {
+		return structs, "", false
+	}
+
+	pkg_name = file.pkg_name != "" ? strings.clone(file.pkg_name, allocator) : ""
 
 	for decl in file.decls {
 		#partial switch d in decl.derived {
@@ -41,7 +77,7 @@ parse_file :: proc(
 		}
 	}
 
-	return structs, true
+	return structs, pkg_name, true
 }
 
 process_value_decl :: proc(
@@ -103,7 +139,7 @@ process_field :: proc(
 			field_info: Field_Info
 			field_info.odin_name = strings.clone(n.name, allocator)
 			field_info.json_name = json_name
-			field_info.type_kind, field_info.type_name, field_info.element_type =
+			field_info.type_kind, field_info.type_name, field_info.element_type, field_info.array_size =
 				determine_type_kind(field.type, allocator)
 
 			append(fields, field_info)
@@ -151,33 +187,44 @@ determine_type_kind :: proc(
 	kind: Type_Kind,
 	type_name: string,
 	element_type: string,
+	array_size: int,
 ) {
 	if type_expr == nil {
-		return .Unknown, "", ""
+		return .Unknown, "", "", 0
 	}
 
 	#partial switch t in type_expr.derived {
 	case ^ast.Ident:
-		return type_from_ident(t.name, allocator)
+		k, n, e := type_from_ident(t.name, allocator)
+		return k, n, e, 0
 
 	case ^ast.Array_Type:
-		elem_kind, elem_name, _ := determine_type_kind(t.elem, allocator)
+		elem_kind, elem_name, _, _ := determine_type_kind(t.elem, allocator)
 		element_type = elem_name
 
+		if t.len != nil {
+			size := parse_array_length(t.len)
+			if elem_kind == .Struct {
+				return .Fixed_Array_Struct, "fixed", elem_name, size
+			} else {
+				return .Fixed_Array_Primitive, "fixed", elem_name, size
+			}
+		}
+
 		if elem_kind == .Struct {
-			return .Array_Struct, "slice", elem_name
+			return .Array_Struct, "slice", elem_name, 0
 		} else {
-			return .Array_Primitive, "slice", elem_name
+			return .Array_Primitive, "slice", elem_name, 0
 		}
 
 	case ^ast.Dynamic_Array_Type:
-		elem_kind, elem_name, _ := determine_type_kind(t.elem, allocator)
+		elem_kind, elem_name, _, _ := determine_type_kind(t.elem, allocator)
 		element_type = elem_name
 
 		if elem_kind == .Struct {
-			return .Dynamic_Struct, "dynamic", elem_name
+			return .Dynamic_Struct, "dynamic", elem_name, 0
 		} else {
-			return .Dynamic_Primitive, "dynamic", elem_name
+			return .Dynamic_Primitive, "dynamic", elem_name, 0
 		}
 
 	case ^ast.Pointer_Type:
@@ -185,10 +232,24 @@ determine_type_kind :: proc(
 
 	case ^ast.Selector_Expr:
 		type_name = expr_to_string(type_expr, allocator)
-		return .Struct, type_name, ""
+		return .Struct, type_name, "", 0
 	}
 
-	return .Unknown, "", ""
+	return .Unknown, "", "", 0
+}
+
+parse_array_length :: proc(expr: ^ast.Expr) -> int {
+	if expr == nil {
+		return 0
+	}
+	#partial switch e in expr.derived {
+	case ^ast.Basic_Lit:
+		val, ok := strconv.parse_int(e.tok.text)
+		if ok {
+			return val
+		}
+	}
+	return 0
 }
 
 type_from_ident :: proc(

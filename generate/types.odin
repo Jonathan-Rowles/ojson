@@ -27,6 +27,8 @@ Type_Kind :: enum {
 	Array_Struct, // []User
 	Dynamic_Primitive, // [dynamic]int
 	Dynamic_Struct, // [dynamic]User
+	Fixed_Array_Primitive, // [10]int, [5]string, etc.
+	Fixed_Array_Struct, // [10]User
 	Unknown,
 }
 
@@ -37,11 +39,15 @@ Field_Info :: struct {
 	type_name:    string,
 	element_type: string,
 	base_type:    string,
+	array_size:   int, // For fixed-size arrays like [10]T
 }
 
 Struct_Info :: struct {
-	name:   string,
-	fields: [dynamic]Field_Info,
+	name:           string,
+	fields:         [dynamic]Field_Info,
+	source_file:    string, // File where struct was found
+	source_package: string, // Package name where struct was found
+	source_dir:     string, // Directory where struct was found
 }
 
 CLI_Options :: struct {

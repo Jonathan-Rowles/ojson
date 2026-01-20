@@ -15,6 +15,8 @@ DEFAULT_READER_ARENA_SIZE :: 4096
 DEFAULT_WRITE_BUFFER_SIZE :: 1024
 BYTES_PER_VALUE_ESTIMATE :: 32
 
+Element :: distinct u32
+
 Value_Type :: enum u8 {
 	Null,
 	True,

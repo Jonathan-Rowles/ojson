@@ -216,7 +216,7 @@ test_generate_simple_struct :: proc(t: ^testing.T) {
 		Field_Info{odin_name = "age", json_name = "age", type_kind = .Int, type_name = "int"},
 	)
 
-	code := generate_code({info}, "json", alloc)
+	code := generate_code({info}, "json", "", "", alloc)
 
 	testing.expect(t, strings.contains(code, "unmarshal_user"), "should contain unmarshal_user")
 	testing.expect(t, strings.contains(code, "read_string"), "should contain read_string")
@@ -245,7 +245,7 @@ test_generate_nested_struct :: proc(t: ^testing.T) {
 		},
 	)
 
-	code := generate_code({info}, "json", alloc)
+	code := generate_code({info}, "json", "", "", alloc)
 
 	testing.expect(
 		t,
@@ -271,7 +271,7 @@ test_generate_integer_cast :: proc(t: ^testing.T) {
 		Field_Info{odin_name = "count", json_name = "count", type_kind = .U32, type_name = "u32"},
 	)
 
-	code := generate_code({info}, "json", alloc)
+	code := generate_code({info}, "json", "", "", alloc)
 
 	testing.expect(t, strings.contains(code, "u32(val)"), "should contain u32 cast")
 	testing.expect(t, strings.contains(code, "read_i64"), "should read as i64")
@@ -294,7 +294,7 @@ test_generate_float_cast :: proc(t: ^testing.T) {
 		Field_Info{odin_name = "value", json_name = "value", type_kind = .F32, type_name = "f32"},
 	)
 
-	code := generate_code({info}, "json", alloc)
+	code := generate_code({info}, "json", "", "", alloc)
 
 	testing.expect(t, strings.contains(code, "f32(val)"), "should contain f32 cast")
 	testing.expect(t, strings.contains(code, "read_f64"), "should read as f64")
@@ -323,9 +323,9 @@ test_generate_array_struct :: proc(t: ^testing.T) {
 		},
 	)
 
-	code := generate_code({info}, "json", alloc)
+	code := generate_code({info}, "json", "", "", alloc)
 
-	testing.expect(t, strings.contains(code, "array_len"), "should check array length")
+	testing.expect(t, strings.contains(code, "array_elements_from"), "should get array elements")
 	testing.expect(t, strings.contains(code, "make([]User"), "should make User slice")
 	testing.expect(t, strings.contains(code, "unmarshal_user"), "should call unmarshal_user")
 }
@@ -353,9 +353,9 @@ test_generate_array_primitive :: proc(t: ^testing.T) {
 		},
 	)
 
-	code := generate_code({info}, "json", alloc)
+	code := generate_code({info}, "json", "", "", alloc)
 
-	testing.expect(t, strings.contains(code, "array_len"), "should check array length")
+	testing.expect(t, strings.contains(code, "array_elements_from"), "should get array elements")
 	testing.expect(t, strings.contains(code, "make([]int"), "should make int slice")
 	testing.expect(t, strings.contains(code, "read_int"), "should read int elements")
 }
@@ -588,7 +588,6 @@ Group :: struct {
 	items: [dynamic]int ` + "`json:\"items\"`" + `,
 }
 `
-
 
 	NO_POS :: tokenizer.Pos{}
 	file := ast.new(ast.File, NO_POS, NO_POS)

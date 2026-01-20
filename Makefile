@@ -13,11 +13,13 @@ build-generator:
 
 generate: build-generator
 ifndef SRC
-	$(error SRC is required. Usage: make generate SRC=. or make generate SRC=./models)
+	$(error SRC is required. Usage: make generate SRC=../myproject/types)
 endif
-	@./bin/generate -r $(SRC) -o unmarshal.gen.odin
+	@mkdir -p gen
+	@./bin/generate -r $(SRC) 
 
 clean:
 	@rm -rf bin/
+	@rm -rf gen/
 	@rm -f unmarshal.gen.odin
 	@echo "cleaned"
