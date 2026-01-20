@@ -1,0 +1,427 @@
+package jsonimpl
+
+import "core:testing"
+
+@(test)
+test_parse_simple_object :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"name": "test", "value": 42}`))
+	testing.expect_value(t, err, Error.OK)
+
+	name, name_err := read_string(&r, "name")
+	testing.expect_value(t, name_err, Error.OK)
+	testing.expect_value(t, name, "test")
+
+	value, value_err := read_int(&r, "value")
+	testing.expect_value(t, value_err, Error.OK)
+	testing.expect_value(t, value, 42)
+}
+
+@(test)
+test_parse_nested_object :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"user": {"name": "alice", "age": 30}}`))
+	testing.expect_value(t, err, Error.OK)
+
+	name, name_err := read_string(&r, "user.name")
+	testing.expect_value(t, name_err, Error.OK)
+	testing.expect_value(t, name, "alice")
+
+	age, age_err := read_int(&r, "user.age")
+	testing.expect_value(t, age_err, Error.OK)
+	testing.expect_value(t, age, 30)
+}
+
+@(test)
+test_parse_array :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"items": [1, 2, 3]}`))
+	testing.expect_value(t, err, Error.OK)
+
+	length, len_err := array_len(&r, "items")
+	testing.expect_value(t, len_err, Error.OK)
+	testing.expect_value(t, length, 3)
+
+	first, first_err := read_int(&r, "items.0")
+	testing.expect_value(t, first_err, Error.OK)
+	testing.expect_value(t, first, 1)
+
+	third, third_err := read_int(&r, "items.2")
+	testing.expect_value(t, third_err, Error.OK)
+	testing.expect_value(t, third, 3)
+}
+
+@(test)
+test_parse_booleans :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"active": true, "deleted": false}`))
+	testing.expect_value(t, err, Error.OK)
+
+	active, active_err := read_bool(&r, "active")
+	testing.expect_value(t, active_err, Error.OK)
+	testing.expect_value(t, active, true)
+
+	deleted, deleted_err := read_bool(&r, "deleted")
+	testing.expect_value(t, deleted_err, Error.OK)
+	testing.expect_value(t, deleted, false)
+}
+
+@(test)
+test_parse_null :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"data": null}`))
+	testing.expect_value(t, err, Error.OK)
+	testing.expect(t, is_null(&r, "data"), "data should be null")
+}
+
+@(test)
+test_parse_float :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"pi": 3.14159, "neg": -1.5e10}`))
+	testing.expect_value(t, err, Error.OK)
+
+	pi, pi_err := read_f64(&r, "pi")
+	testing.expect_value(t, pi_err, Error.OK)
+	testing.expect(t, pi > 3.14 && pi < 3.15, "pi should be ~3.14")
+
+	neg, neg_err := read_f64(&r, "neg")
+	testing.expect_value(t, neg_err, Error.OK)
+	testing.expect(t, neg < 0, "neg should be negative")
+}
+
+@(test)
+test_parse_escaped_string :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"msg": "hello\nworld", "quote": "say \"hi\""}`))
+	testing.expect_value(t, err, Error.OK)
+
+	msg, msg_err := read_string(&r, "msg")
+	testing.expect_value(t, msg_err, Error.OK)
+	testing.expect_value(t, msg, "hello\nworld")
+
+	quote, quote_err := read_string(&r, "quote")
+	testing.expect_value(t, quote_err, Error.OK)
+	testing.expect_value(t, quote, `say "hi"`)
+}
+
+@(test)
+test_exists :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"a": {"b": 1}}`))
+	testing.expect_value(t, err, Error.OK)
+
+	testing.expect(t, exists(&r, "a"), "a should exist")
+	testing.expect(t, exists(&r, "a.b"), "a.b should exist")
+	testing.expect(t, !exists(&r, "c"), "c should not exist")
+	testing.expect(t, !exists(&r, "a.c"), "a.c should not exist")
+}
+
+@(test)
+test_empty_object :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{}`))
+	testing.expect_value(t, err, Error.OK)
+}
+
+@(test)
+test_empty_array :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"arr": []}`))
+	testing.expect_value(t, err, Error.OK)
+
+	length, len_err := array_len(&r, "arr")
+	testing.expect_value(t, len_err, Error.OK)
+	testing.expect_value(t, length, 0)
+}
+
+@(test)
+test_array_of_objects :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"users": [{"name": "alice"}, {"name": "bob"}]}`))
+	testing.expect_value(t, err, Error.OK)
+
+	first_name, first_err := read_string(&r, "users.0.name")
+	testing.expect_value(t, first_err, Error.OK)
+	testing.expect_value(t, first_name, "alice")
+
+	second_name, second_err := read_string(&r, "users.1.name")
+	testing.expect_value(t, second_err, Error.OK)
+	testing.expect_value(t, second_name, "bob")
+}
+
+@(test)
+test_reset_reuse :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err1 := parse(&r, transmute([]byte)string(`{"x": 1}`))
+	testing.expect_value(t, err1, Error.OK)
+
+	x1, _ := read_int(&r, "x")
+	testing.expect_value(t, x1, 1)
+
+	reset(&r)
+
+	err2 := parse(&r, transmute([]byte)string(`{"y": 2}`))
+	testing.expect_value(t, err2, Error.OK)
+
+	y, _ := read_int(&r, "y")
+	testing.expect_value(t, y, 2)
+
+	testing.expect(t, !exists(&r, "x"), "x should not exist after reset")
+}
+
+@(test)
+test_unicode_escape :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{"emoji": "\u0048\u0065\u006c\u006c\u006f"}`))
+	testing.expect_value(t, err, Error.OK)
+
+	emoji, emoji_err := read_string(&r, "emoji")
+	testing.expect_value(t, emoji_err, Error.OK)
+	testing.expect_value(t, emoji, "Hello")
+}
+
+@(test)
+test_root_array :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`[1, 2, 3]`))
+	testing.expect_value(t, err, Error.OK)
+
+	first, first_err := read_int(&r, "0")
+	testing.expect_value(t, first_err, Error.OK)
+	testing.expect_value(t, first, 1)
+
+	third, third_err := read_int(&r, "2")
+	testing.expect_value(t, third_err, Error.OK)
+	testing.expect_value(t, third, 3)
+}
+
+@(test)
+test_whitespace :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	json := `
+	{
+		"name" : "test" ,
+		"value" : 123
+	}
+	`
+
+
+	err := parse(&r, transmute([]byte)json)
+	testing.expect_value(t, err, Error.OK)
+
+	name, _ := read_string(&r, "name")
+	testing.expect_value(t, name, "test")
+
+	value, _ := read_int(&r, "value")
+	testing.expect_value(t, value, 123)
+}
+
+@(test)
+test_deep_nesting :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	data := `{"a": {"b": {"c": {"d": {"e": "deep"}}}}}`
+	err := parse(&r, transmute([]byte)data)
+	testing.expect_value(t, err, Error.OK)
+
+	val, err_val := read_string(&r, "a.b.c.d.e")
+	testing.expect_value(t, err_val, Error.OK)
+	testing.expect_value(t, val, "deep")
+}
+
+@(test)
+test_parse_auto_reset :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err1 := parse(&r, transmute([]byte)string(`{"value": 1}`))
+	testing.expect_value(t, err1, Error.OK)
+
+	v1, _ := read_int(&r, "value")
+	testing.expect_value(t, v1, 1)
+
+	err2 := parse(&r, transmute([]byte)string(`{"value": 2}`))
+	testing.expect_value(t, err2, Error.OK)
+
+	v2, _ := read_int(&r, "value")
+	testing.expect_value(t, v2, 2)
+}
+
+@(test)
+test_read_before_parse :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	_, err := read_string(&r, "key")
+	testing.expect_value(t, err, Error.Not_Parsed)
+}
+
+@(test)
+test_invalid_json :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	err := parse(&r, transmute([]byte)string(`{invalid json}`))
+	testing.expect(t, err != .OK, "expected parse to fail")
+}
+
+@(test)
+test_large_numbers :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	data := `{"big": 9007199254740991}`
+	err := parse(&r, transmute([]byte)data)
+	testing.expect_value(t, err, Error.OK)
+
+	big, big_err := read_i64(&r, "big")
+	testing.expect_value(t, big_err, Error.OK)
+	testing.expect_value(t, big, i64(9007199254740991))
+}
+
+@(test)
+test_negative_numbers :: proc(t: ^testing.T) {
+	r := init_reader()
+	defer destroy(&r)
+
+	data := `{"neg": -42, "negf": -3.14}`
+	err := parse(&r, transmute([]byte)data)
+	testing.expect_value(t, err, Error.OK)
+
+	neg, _ := read_int(&r, "neg")
+	testing.expect_value(t, neg, -42)
+
+	negf, _ := read_f64(&r, "negf")
+	testing.expect(t, negf < -3.13 && negf > -3.15, "expected ~-3.14")
+}
+
+@(test)
+test_get_string :: proc(t: ^testing.T) {
+	data := `{"name": "alice", "user": {"email": "alice@test.com"}}`
+
+	name, name_err := get_string(transmute([]byte)data, "name")
+	testing.expect_value(t, name_err, Error.OK)
+	testing.expect_value(t, name, "alice")
+
+	email, email_err := get_string(transmute([]byte)data, "user.email")
+	testing.expect_value(t, email_err, Error.OK)
+	testing.expect_value(t, email, "alice@test.com")
+}
+
+@(test)
+test_get_int :: proc(t: ^testing.T) {
+	data := `{"count": 42, "nested": {"value": -10}}`
+
+	count, count_err := get_int(transmute([]byte)data, "count")
+	testing.expect_value(t, count_err, Error.OK)
+	testing.expect_value(t, count, 42)
+
+	value, value_err := get_int(transmute([]byte)data, "nested.value")
+	testing.expect_value(t, value_err, Error.OK)
+	testing.expect_value(t, value, -10)
+}
+
+@(test)
+test_get_f64 :: proc(t: ^testing.T) {
+	data := `{"pi": 3.14159}`
+
+	pi, pi_err := get_f64(transmute([]byte)data, "pi")
+	testing.expect_value(t, pi_err, Error.OK)
+	testing.expect(t, pi > 3.14 && pi < 3.15, "expected ~3.14")
+}
+
+@(test)
+test_get_bool :: proc(t: ^testing.T) {
+	data := `{"active": true, "deleted": false}`
+
+	active, active_err := get_bool(transmute([]byte)data, "active")
+	testing.expect_value(t, active_err, Error.OK)
+	testing.expect_value(t, active, true)
+
+	deleted, deleted_err := get_bool(transmute([]byte)data, "deleted")
+	testing.expect_value(t, deleted_err, Error.OK)
+	testing.expect_value(t, deleted, false)
+}
+
+@(test)
+test_get_missing_key :: proc(t: ^testing.T) {
+	data := `{"name": "test"}`
+
+	_, err := get_string(transmute([]byte)data, "missing")
+	testing.expect_value(t, err, Error.Key_Not_Found)
+}
+
+@(test)
+test_get_type_mismatch :: proc(t: ^testing.T) {
+	data := `{"name": "test"}`
+
+	_, err := get_int(transmute([]byte)data, "name")
+	testing.expect_value(t, err, Error.Type_Mismatch)
+}
+
+@(test)
+test_writer_basic :: proc(t: ^testing.T) {
+	w := init_writer()
+	defer destroy_writer(&w)
+
+	data := struct {
+		name: string,
+		age:  int,
+	}{"alice", 30}
+
+	out, err := marshal_to(&w, data)
+	testing.expect_value(t, err, Error.OK)
+	testing.expect(t, len(out) > 0, "expected non-empty output")
+}
+
+@(test)
+test_writer_reuse :: proc(t: ^testing.T) {
+	w := init_writer()
+	defer destroy_writer(&w)
+
+	data1 := struct {
+		x: int,
+	}{1}
+	data2 := struct {
+		y: int,
+	}{2}
+
+	out1, err1 := marshal_to(&w, data1)
+	testing.expect_value(t, err1, Error.OK)
+	testing.expect(t, len(out1) > 0, "expected non-empty output")
+
+	out2, err2 := marshal_to(&w, data2)
+	testing.expect_value(t, err2, Error.OK)
+	testing.expect(t, len(out2) > 0, "expected non-empty output")
+}
