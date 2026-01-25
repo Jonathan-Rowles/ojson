@@ -30,6 +30,11 @@ generate_code :: proc(
 		if info.source_package == "" || info.source_dir == "" {
 			continue
 		}
+
+		if info.source_package == package_name {
+			continue
+		}
+
 		if info.source_dir not_in packages {
 			import_path, _ := fp.rel(output_dir, info.source_dir)
 			packages[info.source_dir] = Package_Info {

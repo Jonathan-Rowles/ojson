@@ -8,8 +8,7 @@ test:
 	@odin test ./generate -out:bin/test-gen $(DEV_FLAGS) -define:ODIN_TEST_SHORT_LOGS=true -define:ODIN_TEST_LOG_LEVEL=warning
 
 build-generator:
-	@mkdir -p bin
-	@odin build ./generate -out:bin/generate $(DEV_FLAGS)
+	@[ -f bin/generate ] || (mkdir -p bin && odin build ./generate -out:bin/generate $(DEV_FLAGS))
 
 generate: build-generator
 ifndef SRC

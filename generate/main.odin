@@ -17,7 +17,6 @@ main :: proc() {
 	opts: Options
 	opts.output = "gen/unmarshal.gen.odin"
 	opts.package_name = "gen"
-
 	flags.parse_or_exit(&opts, os.args, .Unix)
 
 	if opts.verbose {
@@ -87,10 +86,17 @@ main :: proc() {
 		fmt.printfln("Total structs found: %d", len(all_structs))
 	}
 
-	cwd := os.get_current_directory()
-	ojson_import, _ := fp.rel(abs_output_dir, cwd)
+	exe_path := os.args[0]
+	exe_dir := fp.dir(exe_path)
+	ojson_root := fp.dir(exe_dir)
+	ojson_jsonimpl := fp.join({ojson_root, "jsonimpl"})
+
+	abs_ojson, _ := fp.abs(ojson_jsonimpl)
+	ojson_import, _ := fp.rel(abs_output_dir, abs_ojson)
 
 	if opts.verbose {
+		fmt.printfln("Generator exe: %s", exe_path)
+		fmt.printfln("Ojson jsonimpl: %s", abs_ojson)
 		fmt.printfln("Ojson import: %s", ojson_import)
 	}
 
