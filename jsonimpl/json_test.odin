@@ -4,8 +4,9 @@ import "core:testing"
 
 @(test)
 test_parse_simple_object :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"name": "test", "value": 42}`))
 	testing.expect_value(t, err, Error.OK)
@@ -21,8 +22,9 @@ test_parse_simple_object :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_nested_object :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"user": {"name": "alice", "age": 30}}`))
 	testing.expect_value(t, err, Error.OK)
@@ -38,8 +40,9 @@ test_parse_nested_object :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_array :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"items": [1, 2, 3]}`))
 	testing.expect_value(t, err, Error.OK)
@@ -59,8 +62,9 @@ test_parse_array :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_booleans :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"active": true, "deleted": false}`))
 	testing.expect_value(t, err, Error.OK)
@@ -76,8 +80,9 @@ test_parse_booleans :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_null :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"data": null}`))
 	testing.expect_value(t, err, Error.OK)
@@ -86,8 +91,9 @@ test_parse_null :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_float :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"pi": 3.14159, "neg": -1.5e10}`))
 	testing.expect_value(t, err, Error.OK)
@@ -103,8 +109,9 @@ test_parse_float :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_escaped_string :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"msg": "hello\nworld", "quote": "say \"hi\""}`))
 	testing.expect_value(t, err, Error.OK)
@@ -120,8 +127,9 @@ test_parse_escaped_string :: proc(t: ^testing.T) {
 
 @(test)
 test_exists :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"a": {"b": 1}}`))
 	testing.expect_value(t, err, Error.OK)
@@ -134,8 +142,9 @@ test_exists :: proc(t: ^testing.T) {
 
 @(test)
 test_empty_object :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{}`))
 	testing.expect_value(t, err, Error.OK)
@@ -143,8 +152,9 @@ test_empty_object :: proc(t: ^testing.T) {
 
 @(test)
 test_empty_array :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"arr": []}`))
 	testing.expect_value(t, err, Error.OK)
@@ -156,8 +166,9 @@ test_empty_array :: proc(t: ^testing.T) {
 
 @(test)
 test_array_of_objects :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"users": [{"name": "alice"}, {"name": "bob"}]}`))
 	testing.expect_value(t, err, Error.OK)
@@ -172,9 +183,10 @@ test_array_of_objects :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_reset_reuse :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+test_reuse :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err1 := parse(&r, transmute([]byte)string(`{"x": 1}`))
 	testing.expect_value(t, err1, Error.OK)
@@ -182,21 +194,20 @@ test_reset_reuse :: proc(t: ^testing.T) {
 	x1, _ := read_int(&r, "x")
 	testing.expect_value(t, x1, 1)
 
-	reset(&r)
-
 	err2 := parse(&r, transmute([]byte)string(`{"y": 2}`))
 	testing.expect_value(t, err2, Error.OK)
 
 	y, _ := read_int(&r, "y")
 	testing.expect_value(t, y, 2)
 
-	testing.expect(t, !exists(&r, "x"), "x should not exist after reset")
+	testing.expect(t, !exists(&r, "x"), "x should not exist after new parse")
 }
 
 @(test)
 test_unicode_escape :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"emoji": "\u0048\u0065\u006c\u006c\u006f"}`))
 	testing.expect_value(t, err, Error.OK)
@@ -208,8 +219,9 @@ test_unicode_escape :: proc(t: ^testing.T) {
 
 @(test)
 test_root_array :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`[1, 2, 3]`))
 	testing.expect_value(t, err, Error.OK)
@@ -225,8 +237,9 @@ test_root_array :: proc(t: ^testing.T) {
 
 @(test)
 test_whitespace :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	json := `
 	{
@@ -248,8 +261,9 @@ test_whitespace :: proc(t: ^testing.T) {
 
 @(test)
 test_deep_nesting :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	data := `{"a": {"b": {"c": {"d": {"e": "deep"}}}}}`
 	err := parse(&r, transmute([]byte)data)
@@ -262,8 +276,9 @@ test_deep_nesting :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_auto_reset :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err1 := parse(&r, transmute([]byte)string(`{"value": 1}`))
 	testing.expect_value(t, err1, Error.OK)
@@ -280,8 +295,9 @@ test_parse_auto_reset :: proc(t: ^testing.T) {
 
 @(test)
 test_read_before_parse :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	_, err := read_string(&r, "key")
 	testing.expect_value(t, err, Error.Not_Parsed)
@@ -289,8 +305,9 @@ test_read_before_parse :: proc(t: ^testing.T) {
 
 @(test)
 test_invalid_json :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{invalid json}`))
 	testing.expect(t, err != .OK, "expected parse to fail")
@@ -298,8 +315,9 @@ test_invalid_json :: proc(t: ^testing.T) {
 
 @(test)
 test_large_numbers :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	data := `{"big": 9007199254740991}`
 	err := parse(&r, transmute([]byte)data)
@@ -312,8 +330,9 @@ test_large_numbers :: proc(t: ^testing.T) {
 
 @(test)
 test_negative_numbers :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	data := `{"neg": -42, "negf": -3.14}`
 	err := parse(&r, transmute([]byte)data)
@@ -428,8 +447,9 @@ test_writer_reuse :: proc(t: ^testing.T) {
 
 @(test)
 test_root_element :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"name": "test"}`))
 	testing.expect_value(t, err, Error.OK)
@@ -442,8 +462,9 @@ test_root_element :: proc(t: ^testing.T) {
 
 @(test)
 test_element_at :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"user": {"name": "alice", "age": 30}}`))
 	testing.expect_value(t, err, Error.OK)
@@ -462,8 +483,9 @@ test_element_at :: proc(t: ^testing.T) {
 
 @(test)
 test_element_at_empty_path :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"x": 1}`))
 	testing.expect_value(t, err, Error.OK)
@@ -477,8 +499,9 @@ test_element_at_empty_path :: proc(t: ^testing.T) {
 
 @(test)
 test_array_elements :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"items": [10, 20, 30]}`))
 	testing.expect_value(t, err, Error.OK)
@@ -499,8 +522,9 @@ test_array_elements :: proc(t: ^testing.T) {
 
 @(test)
 test_array_elements_from :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"data": {"values": [1, 2, 3]}}`))
 	testing.expect_value(t, err, Error.OK)
@@ -516,8 +540,9 @@ test_array_elements_from :: proc(t: ^testing.T) {
 
 @(test)
 test_obj_element_from :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"outer": {"inner": {"value": 42}}}`))
 	testing.expect_value(t, err, Error.OK)
@@ -533,8 +558,9 @@ test_obj_element_from :: proc(t: ^testing.T) {
 
 @(test)
 test_array_element_from :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"items": ["a", "b", "c"]}`))
 	testing.expect_value(t, err, Error.OK)
@@ -550,8 +576,9 @@ test_array_element_from :: proc(t: ^testing.T) {
 
 @(test)
 test_read_elem_all_types :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	json := `{
 		"str": "hello",
@@ -587,8 +614,9 @@ test_read_elem_all_types :: proc(t: ^testing.T) {
 
 @(test)
 test_array_of_objects_elem :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	json := `{"users": [{"name": "alice", "age": 30}, {"name": "bob", "age": 25}]}`
 	err := parse(&r, transmute([]byte)json)
@@ -610,8 +638,9 @@ test_array_of_objects_elem :: proc(t: ^testing.T) {
 
 @(test)
 test_nested_array_elem :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	json := `{"matrix": [[1, 2], [3, 4], [5, 6]]}`
 	err := parse(&r, transmute([]byte)json)
@@ -632,8 +661,9 @@ test_nested_array_elem :: proc(t: ^testing.T) {
 
 @(test)
 test_element_not_found :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"a": 1}`))
 	testing.expect_value(t, err, Error.OK)
@@ -648,8 +678,9 @@ test_element_not_found :: proc(t: ^testing.T) {
 
 @(test)
 test_element_type_mismatch :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(&r, transmute([]byte)string(`{"str": "hello", "num": 42}`))
 	testing.expect_value(t, err, Error.OK)
@@ -665,8 +696,9 @@ test_element_type_mismatch :: proc(t: ^testing.T) {
 
 @(test)
 test_string_to_number_coercion :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(
 		&r,
@@ -694,8 +726,9 @@ test_string_to_number_coercion :: proc(t: ^testing.T) {
 
 @(test)
 test_string_to_number_coercion_in_array :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(
 		&r,
@@ -724,8 +757,9 @@ test_string_to_number_coercion_in_array :: proc(t: ^testing.T) {
 
 @(test)
 test_string_to_bool_coercion :: proc(t: ^testing.T) {
-	r := init_reader()
-	defer destroy(&r)
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
 
 	err := parse(
 		&r,

@@ -2,28 +2,21 @@ package ojson
 
 import oj "jsonimpl"
 
-DEFAULT_READER_ARENA_SIZE :: oj.DEFAULT_READER_ARENA_SIZE
+DEFAULT_READER_SIZE :: oj.DEFAULT_READER_SIZE
 DEFAULT_WRITE_BUFFER_SIZE :: oj.DEFAULT_WRITE_BUFFER_SIZE
 
-Error      :: oj.Error
-Reader     :: oj.Reader
-Writer     :: oj.Writer
+Error :: oj.Error
+Reader :: oj.Reader
+Writer :: oj.Writer
 Value_Type :: oj.Value_Type
-Element    :: oj.Element
+Element :: oj.Element
 
-init_reader :: proc(
-	arena_size := DEFAULT_READER_ARENA_SIZE,
-	allocator := context.allocator,
-) -> Reader {
-	return oj.init_reader(arena_size, allocator)
+init_reader :: proc(r: ^Reader, size := DEFAULT_READER_SIZE, allocator := context.allocator) {
+	oj.init_reader(r, size, allocator)
 }
 
 parse :: proc(r: ^Reader, data: []byte) -> Error {
 	return oj.parse(r, data)
-}
-
-reset :: proc(r: ^Reader) {
-	oj.reset(r)
 }
 
 read_string :: proc(r: ^Reader, key: string) -> (value: string, err: Error) {
@@ -142,63 +135,54 @@ destroy :: proc {
 get_string :: proc(
 	data: []byte,
 	key: string,
-	arena_size := DEFAULT_READER_ARENA_SIZE,
 	allocator := context.allocator,
 ) -> (
 	value: string,
 	err: Error,
 ) {
-	return oj.get_string(data, key, arena_size, allocator)
+	return oj.get_string(data, key, allocator)
 }
 
-// One-shot convenience functions
 get_int :: proc(
 	data: []byte,
 	key: string,
-	arena_size := DEFAULT_READER_ARENA_SIZE,
 	allocator := context.allocator,
 ) -> (
 	value: int,
 	err: Error,
 ) {
-	return oj.get_int(data, key, arena_size, allocator)
+	return oj.get_int(data, key, allocator)
 }
 
-// One-shot convenience functions
 get_i64 :: proc(
 	data: []byte,
 	key: string,
-	arena_size := DEFAULT_READER_ARENA_SIZE,
 	allocator := context.allocator,
 ) -> (
 	value: i64,
 	err: Error,
 ) {
-	return oj.get_i64(data, key, arena_size, allocator)
+	return oj.get_i64(data, key, allocator)
 }
 
-// One-shot convenience functions
 get_f64 :: proc(
 	data: []byte,
 	key: string,
-	arena_size := DEFAULT_READER_ARENA_SIZE,
 	allocator := context.allocator,
 ) -> (
 	value: f64,
 	err: Error,
 ) {
-	return oj.get_f64(data, key, arena_size, allocator)
+	return oj.get_f64(data, key, allocator)
 }
 
-// One-shot convenience functions
 get_bool :: proc(
 	data: []byte,
 	key: string,
-	arena_size := DEFAULT_READER_ARENA_SIZE,
 	allocator := context.allocator,
 ) -> (
 	value: bool,
 	err: Error,
 ) {
-	return oj.get_bool(data, key, arena_size, allocator)
+	return oj.get_bool(data, key, allocator)
 }

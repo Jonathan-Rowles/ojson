@@ -4,52 +4,13 @@ import "core:math"
 import "core:strconv"
 import "core:strings"
 
-parser_init :: proc(p: ^Parser_State, allocator := context.allocator) {
-	p.allocator = allocator
-	p.values = make([dynamic]Lazy_Value, allocator)
-}
-
-parser_reset :: proc(p: ^Parser_State) {
-	for &v in p.values {
-		#partial switch v.type {
-		case .Object:
-			delete(v.data.obj)
-		case .Array:
-			delete(v.data.arr)
-		}
-	}
-	clear(&p.values)
-	p.input = ""
-	p.pos = 0
-	p.root = 0
-	p.depth = 0
-}
-
-parser_destroy :: proc(p: ^Parser_State) {
-	for &v in p.values {
-		#partial switch v.type {
-		case .Object:
-			delete(v.data.obj)
-		case .Array:
-			delete(v.data.arr)
-		}
-	}
-	delete(p.values)
-}
-
 parser_parse :: proc(p: ^Parser_State, input: string) -> Error {
-	parser_reset(p)
 	p.input = input
-
-	estimated := len(input) / BYTES_PER_VALUE_ESTIMATE
-	if estimated > 0 {
-		reserve(&p.values, estimated)
-	}
-
-	skip_ws(p)
-	if p.pos >= len(p.input) {
-		return .Invalid_JSON
-	}
+	p.pos = 0
+	p.depth = 0
+	p.values_len = 0
+	p.kv_len = 0
+	p.arr_len = 0
 
 	root_idx, err := parse_value(p)
 	if err != .OK {
@@ -107,16 +68,22 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 		return 0, .Invalid_JSON
 	}
 
-	obj_idx := u32(len(p.values))
-	append(&p.values, Lazy_Value{type = .Object, data = {obj = make([dynamic]KV, p.allocator)}})
+	obj_idx := p.values_len
+	assert(obj_idx < u32(len(p.values)), "values buffer overflow")
+	p.values_len += 1
 
 	if p.input[p.pos] == '}' {
 		p.pos += 1
+		p.values[obj_idx] = Lazy_Value {
+			type = .Object,
+			data = {container = 0},
+		}
 		return obj_idx, .OK
 	}
 
+	kv_count: u32 = 0
+
 	for {
-		skip_ws(p)
 		if p.pos >= len(p.input) || p.input[p.pos] != '"' {
 			return 0, .Invalid_JSON
 		}
@@ -137,7 +104,14 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 			return 0, val_err
 		}
 
-		append(&p.values[obj_idx].data.obj, KV{key = key, value_idx = value_idx})
+		assert(p.kv_len < u32(len(p.kv_buffer)), "kv_buffer overflow")
+		p.kv_buffer[p.kv_len] = KV {
+			owner_idx = obj_idx,
+			key       = key,
+			value_idx = value_idx,
+		}
+		p.kv_len += 1
+		kv_count += 1
 
 		skip_ws(p)
 		if p.pos >= len(p.input) {
@@ -152,8 +126,13 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 			return 0, .Invalid_JSON
 		}
 		p.pos += 1
+		skip_ws(p)
 	}
 
+	p.values[obj_idx] = Lazy_Value {
+		type = .Object,
+		data = {container = kv_count},
+	}
 	return obj_idx, .OK
 }
 
@@ -165,22 +144,34 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 		return 0, .Invalid_JSON
 	}
 
-	arr_idx := u32(len(p.values))
-	append(&p.values, Lazy_Value{type = .Array, data = {arr = make([dynamic]u32, p.allocator)}})
+	arr_idx := p.values_len
+	assert(arr_idx < u32(len(p.values)), "values buffer overflow")
+	p.values_len += 1
 
 	if p.input[p.pos] == ']' {
 		p.pos += 1
+		p.values[arr_idx] = Lazy_Value {
+			type = .Array,
+			data = {container = 0},
+		}
 		return arr_idx, .OK
 	}
 
+	child_count: u32 = 0
+
 	for {
-		skip_ws(p)
 		value_idx, err := parse_value(p)
 		if err != .OK {
 			return 0, err
 		}
 
-		append(&p.values[arr_idx].data.arr, value_idx)
+		assert(p.arr_len < u32(len(p.arr_buffer)), "arr_buffer overflow")
+		p.arr_buffer[p.arr_len] = ArrEntry {
+			owner_idx = arr_idx,
+			value_idx = value_idx,
+		}
+		p.arr_len += 1
+		child_count += 1
 
 		skip_ws(p)
 		if p.pos >= len(p.input) {
@@ -197,6 +188,10 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 		p.pos += 1
 	}
 
+	p.values[arr_idx] = Lazy_Value {
+		type = .Array,
+		data = {container = child_count},
+	}
 	return arr_idx, .OK
 }
 
@@ -323,8 +318,10 @@ parse_null :: proc(p: ^Parser_State) -> (u32, Error) {
 }
 
 add_value :: #force_inline proc(p: ^Parser_State, v: Lazy_Value) -> u32 {
-	idx := u32(len(p.values))
-	append(&p.values, v)
+	idx := p.values_len
+	assert(idx < u32(len(p.values)), "values buffer overflow")
+	p.values[idx] = v
+	p.values_len += 1
 	return idx
 }
 
