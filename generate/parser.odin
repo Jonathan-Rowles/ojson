@@ -111,13 +111,19 @@ extract_struct_info :: proc(
 	info := new(Struct_Info, allocator)
 	info.name = strings.clone(name, allocator)
 	info.fields = make([dynamic]Field_Info, allocator)
+	info.is_tuple = false
 
 	if struct_type.fields == nil || struct_type.fields.list == nil {
 		return info
 	}
 
+	has_any_json_tag := false
 	for field in struct_type.fields.list {
-		process_field(field, &info.fields, allocator)
+		process_field(field, &info.fields, &has_any_json_tag, allocator)
+	}
+
+	if !has_any_json_tag && len(info.fields) > 0 {
+		info.is_tuple = true
 	}
 
 	return info
@@ -126,11 +132,12 @@ extract_struct_info :: proc(
 process_field :: proc(
 	field: ^ast.Field,
 	fields: ^[dynamic]Field_Info,
+	has_any_json_tag: ^bool,
 	allocator := context.allocator,
 ) {
 	json_name, has_tag := parse_json_tag(field.tag)
-	if !has_tag {
-		return
+	if has_tag {
+		has_any_json_tag^ = true
 	}
 
 	for name_node in field.names {
@@ -138,7 +145,7 @@ process_field :: proc(
 		case ^ast.Ident:
 			field_info: Field_Info
 			field_info.odin_name = strings.clone(n.name, allocator)
-			field_info.json_name = json_name
+			field_info.json_name = has_tag ? json_name : strings.clone(n.name, allocator)
 			field_info.type_kind, field_info.type_name, field_info.element_type, field_info.array_size =
 				determine_type_kind(field.type, allocator)
 

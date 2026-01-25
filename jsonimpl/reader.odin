@@ -43,7 +43,8 @@ read_string :: proc(r: ^Reader, key: string) -> (value: string, err: Error) {
 	if r.parser.values == nil {
 		return "", .Not_Parsed
 	}
-	val, found := get_by_path(&r.parser, key)
+
+	val, found := get_by_path_from(&r.parser, r.parser.root, key)
 	if !found {
 		return "", .Key_Not_Found
 	}
@@ -65,10 +66,12 @@ read_i64 :: proc(r: ^Reader, key: string) -> (value: i64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
-	val, found := get_by_path(&r.parser, key)
+
+	val, found := get_by_path_from(&r.parser, r.parser.root, key)
 	if !found {
 		return 0, .Key_Not_Found
 	}
+
 	#partial switch val.type {
 	case .Number, .String, .Raw_String:
 	case:
@@ -85,10 +88,12 @@ read_f64 :: proc(r: ^Reader, key: string) -> (value: f64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
-	val, found := get_by_path(&r.parser, key)
+
+	val, found := get_by_path_from(&r.parser, r.parser.root, key)
 	if !found {
 		return 0, .Key_Not_Found
 	}
+
 	#partial switch val.type {
 	case .Number, .String, .Raw_String:
 	case:
@@ -105,7 +110,8 @@ read_bool :: proc(r: ^Reader, key: string) -> (value: bool, err: Error) {
 	if r.parser.values == nil {
 		return false, .Not_Parsed
 	}
-	val, found := get_by_path(&r.parser, key)
+
+	val, found := get_by_path_from(&r.parser, r.parser.root, key)
 	if !found {
 		return false, .Key_Not_Found
 	}
@@ -128,7 +134,8 @@ exists :: proc(r: ^Reader, key: string) -> bool {
 	if r.parser.values == nil {
 		return false
 	}
-	_, found := get_by_path(&r.parser, key)
+
+	_, found := get_by_path_from(&r.parser, r.parser.root, key)
 	return found
 }
 
@@ -136,7 +143,8 @@ is_null :: proc(r: ^Reader, key: string) -> bool {
 	if r.parser.values == nil {
 		return false
 	}
-	val, found := get_by_path(&r.parser, key)
+
+	val, found := get_by_path_from(&r.parser, r.parser.root, key)
 	return found && val.type == .Null
 }
 
@@ -154,14 +162,6 @@ array_len :: proc(r: ^Reader, key: string) -> (int, Error) {
 	}
 	return int(val.data.container), .OK
 }
-
-get_by_path :: proc(p: ^Parser_State, path: string) -> (Lazy_Value, bool) {
-	return get_by_path_from(p, p.root, path)
-}
-
-// get_idx_by_path :: proc(p: ^Parser_State, path: string) -> (u32, bool) {
-// 	return get_idx_by_path_from(p, p.root, path)
-// }
 
 object_get_idx :: proc(p: ^Parser_State, obj_idx: u32, key: string) -> (u32, bool) {
 	for &kv in p.kv_buffer[:p.kv_len] {
@@ -647,6 +647,89 @@ read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool
 		return false, .Key_Not_Found
 	}
 
+	#partial switch val.type {
+	case .True:
+		return true, .OK
+	case .False:
+		return false, .OK
+	case .String, .Raw_String:
+		if val.data.str == "true" || val.data.str == "1" {
+			return true, .OK
+		} else if val.data.str == "false" || val.data.str == "0" {
+			return false, .OK
+		}
+	}
+
+	return false, .Type_Mismatch
+}
+
+read_string_value :: proc(r: ^Reader, elem: Element) -> (value: string, err: Error) {
+	if r.parser.values == nil {
+		return "", .Not_Parsed
+	}
+
+	val := r.parser.values[u32(elem)]
+	#partial switch val.type {
+	case .String:
+		return val.data.str, .OK
+	case .Raw_String:
+		return unescape_string(&r.arena, val.data.str), .OK
+	}
+
+	return "", .Type_Mismatch
+}
+
+read_int_value :: proc(r: ^Reader, elem: Element) -> (value: int, err: Error) {
+	i, e := read_i64_value(r, elem)
+	return int(i), e
+}
+
+read_i64_value :: proc(r: ^Reader, elem: Element) -> (value: i64, err: Error) {
+	if r.parser.values == nil {
+		return 0, .Not_Parsed
+	}
+
+	val := r.parser.values[u32(elem)]
+	#partial switch val.type {
+	case .Number, .String, .Raw_String:
+	case:
+		return 0, .Type_Mismatch
+	}
+
+	result, ok := parse_i64_fast(val.data.str)
+	if !ok {
+		return 0, .Type_Mismatch
+	}
+
+	return result, .OK
+}
+
+read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
+	if r.parser.values == nil {
+		return 0, .Not_Parsed
+	}
+
+	val := r.parser.values[u32(elem)]
+	#partial switch val.type {
+	case .Number, .String, .Raw_String:
+	case:
+		return 0, .Type_Mismatch
+	}
+
+	result, ok := parse_f64_fast(val.data.str)
+	if !ok {
+		return 0, .Type_Mismatch
+	}
+
+	return result, .OK
+}
+
+read_bool_value :: proc(r: ^Reader, elem: Element) -> (value: bool, err: Error) {
+	if r.parser.values == nil {
+		return false, .Not_Parsed
+	}
+
+	val := r.parser.values[u32(elem)]
 	#partial switch val.type {
 	case .True:
 		return true, .OK

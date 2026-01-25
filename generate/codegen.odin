@@ -120,12 +120,120 @@ generate_unmarshal_proc :: proc(sb: ^strings.Builder, info: Struct_Info) {
 		g_ojson_prefix,
 	)
 
-	for field in info.fields {
-		generate_field_read(sb, field, info)
+	if info.is_tuple {
+		generate_tuple_read(sb, info)
+	} else {
+		for field in info.fields {
+			generate_field_read(sb, field, info)
+		}
 	}
 
 	strings.write_string(sb, "\treturn\n")
 	strings.write_string(sb, "}\n")
+}
+
+generate_tuple_read :: proc(sb: ^strings.Builder, info: Struct_Info) {
+	oj := g_ojson_prefix
+
+	fmt.sbprintf(sb, "\titems, items_err := %sarray_elements_from(r, elem)\n", oj)
+	fmt.sbprintf(sb, "\tif items_err != .OK do return result, items_err\n\n")
+
+	for field, i in info.fields {
+		#partial switch field.type_kind {
+		case .String:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(
+				sb,
+				"\t\tresult.%s, err = %sread_string_value(r, items[%d])\n",
+				field.odin_name,
+				oj,
+				i,
+			)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case .Int:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(
+				sb,
+				"\t\tresult.%s, err = %sread_int_value(r, items[%d])\n",
+				field.odin_name,
+				oj,
+				i,
+			)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case .I64:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(
+				sb,
+				"\t\tresult.%s, err = %sread_i64_value(r, items[%d])\n",
+				field.odin_name,
+				oj,
+				i,
+			)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case .F64:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(
+				sb,
+				"\t\tresult.%s, err = %sread_f64_value(r, items[%d])\n",
+				field.odin_name,
+				oj,
+				i,
+			)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case .Bool:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(
+				sb,
+				"\t\tresult.%s, err = %sread_bool_value(r, items[%d])\n",
+				field.odin_name,
+				oj,
+				i,
+			)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case .I8, .I16, .I32:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(sb, "\t\tval: i64\n")
+			fmt.sbprintf(sb, "\t\tval, err = %sread_i64_value(r, items[%d])\n", oj, i)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t\tresult.%s = %s(val)\n", field.odin_name, field.type_name)
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case .U8, .U16, .U32, .U64, .Uint:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(sb, "\t\tval: i64\n")
+			fmt.sbprintf(sb, "\t\tval, err = %sread_i64_value(r, items[%d])\n", oj, i)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t\tresult.%s = %s(val)\n", field.odin_name, field.type_name)
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case .F16, .F32:
+			fmt.sbprintf(sb, "\tif len(items) > %d {{\n", i)
+			fmt.sbprintf(sb, "\t\tval: f64\n")
+			fmt.sbprintf(sb, "\t\tval, err = %sread_f64_value(r, items[%d])\n", oj, i)
+			fmt.sbprintf(sb, "\t\tif err != .OK do return\n")
+			fmt.sbprintf(sb, "\t\tresult.%s = %s(val)\n", field.odin_name, field.type_name)
+			fmt.sbprintf(sb, "\t}}\n\n")
+
+		case:
+			fmt.sbprintf(
+				sb,
+				"\t// TODO: Tuple field %s (type %v) at index %d\n\n",
+				field.odin_name,
+				field.type_kind,
+				i,
+			)
+		}
+	}
 }
 
 generate_field_read :: proc(sb: ^strings.Builder, field: Field_Info, parent: Struct_Info) {

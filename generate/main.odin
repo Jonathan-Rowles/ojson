@@ -48,6 +48,9 @@ main :: proc() {
 	output_dir := fp.dir(opts.output)
 	abs_output_dir, _ := fp.abs(output_dir)
 
+	all_parsed_structs := make(map[string]Struct_Info, allocator = context.allocator)
+	defer delete(all_parsed_structs)
+
 	for file in files {
 		structs, pkg_name, parse_ok := parse_file(file)
 		if !parse_ok {
@@ -64,16 +67,46 @@ main :: proc() {
 			info.source_file = file
 			info.source_package = pkg_name
 			info.source_dir = source_dir
+			all_parsed_structs[info.name] = info
+		}
+	}
 
+	for _, info in all_parsed_structs {
+		if !info.is_tuple && len(info.fields) > 0 {
 			if opts.verbose {
 				fmt.printfln(
 					"  Found struct: %s (%d fields) in package %s",
 					info.name,
 					len(info.fields),
-					pkg_name,
+					info.source_package,
 				)
 			}
 			append(&all_structs, info)
+		}
+	}
+
+	added_deps := make(map[string]bool, allocator = context.allocator)
+	defer delete(added_deps)
+
+	for info in all_structs {
+		for field in info.fields {
+			dep_name := field.element_type != "" ? field.element_type : field.type_name
+			if dep_name == "" {
+				continue
+			}
+			if dep_info, found := all_parsed_structs[dep_name]; found {
+				if dep_info.is_tuple && !added_deps[dep_name] {
+					added_deps[dep_name] = true
+					if opts.verbose {
+						fmt.printfln(
+							"  Adding dependency struct: %s (tuple) in package %s",
+							dep_info.name,
+							dep_info.source_package,
+						)
+					}
+					append(&all_structs, dep_info)
+				}
+			}
 		}
 	}
 

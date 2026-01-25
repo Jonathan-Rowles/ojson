@@ -48,6 +48,7 @@ Struct_Info :: struct {
 	source_file:    string, // File where struct was found
 	source_package: string, // Package name where struct was found
 	source_dir:     string, // Directory where struct was found
+	is_tuple:       bool, // True if struct has no json tags (unmarshal as positional array)
 }
 
 CLI_Options :: struct {
