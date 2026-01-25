@@ -450,9 +450,7 @@ User :: struct {
 		}
 	}
 
-	if len(structs) > 0 {
-		testing.expect_value(t, len(structs[0].fields), 0)
-	}
+	testing.expect_value(t, len(structs), 0)
 }
 
 @(test)

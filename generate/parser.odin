@@ -96,7 +96,7 @@ process_value_decl :: proc(
 		#partial switch v in value_node.derived {
 		case ^ast.Struct_Type:
 			struct_info := extract_struct_info(n.name, v, allocator)
-			if struct_info != nil && len(struct_info.fields) > 0 {
+			if struct_info != nil && len(struct_info.fields) > 0 && !struct_info.is_tuple {
 				append(structs, struct_info^)
 			}
 		}
@@ -138,6 +138,9 @@ process_field :: proc(
 	json_name, has_tag := parse_json_tag(field.tag)
 	if has_tag {
 		has_any_json_tag^ = true
+		if json_name == "-" {
+			return
+		}
 	}
 
 	for name_node in field.names {
