@@ -2,6 +2,23 @@
 
 **SIMD-accelerated, lazy JSON field extraction for the [Odin programming language](https://odin-lang.org/).**
 
+ojson lets you extract fields from JSON without fully deserializing the document. Includes a code generator for type-safe unmarshalling.
+
+## Features
+
+- Fast field extraction without full parse
+- Reusable reader for parsing many messages
+- Code generation for struct unmarshalling
+- Zero dependencies
+
+## Installation
+```bash
+# Add as a submodule or copy to your project
+git clone https://github.com/jonathan-rowles/ojson
+```
+
+## Usage
+
 ## Reusable Reader
 
 For parsing many messages:
