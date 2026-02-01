@@ -1,8 +1,9 @@
 package jsonimpl
 
+import "base:intrinsics"
 import "core:math"
+import "core:simd"
 import "core:strconv"
-import "core:strings"
 
 parser_parse :: proc(p: ^Parser_State, input: string) -> Error {
 	p.input = input
@@ -36,28 +37,34 @@ parse_value :: proc(p: ^Parser_State) -> (u32, Error) {
 	if p.depth > MAX_DEPTH {
 		return 0, .Invalid_JSON
 	}
-	defer p.depth -= 1
 
 	c := p.input[p.pos]
 
+	idx: u32
+	err: Error
+
 	switch c {
 	case '{':
-		return parse_object(p)
+		idx, err = parse_object(p)
 	case '[':
-		return parse_array(p)
+		idx, err = parse_array(p)
 	case '"':
-		return parse_string(p)
+		idx, err = parse_string(p)
 	case 't':
-		return parse_true(p)
+		idx, err = parse_true(p)
 	case 'f':
-		return parse_false(p)
+		idx, err = parse_false(p)
 	case 'n':
-		return parse_null(p)
+		idx, err = parse_null(p)
 	case '-', '0' ..= '9':
-		return parse_number(p)
+		idx, err = parse_number(p)
+	case:
+		p.depth -= 1
+		return 0, .Invalid_JSON
 	}
 
-	return 0, .Invalid_JSON
+	p.depth -= 1
+	return idx, err
 }
 
 parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
@@ -198,29 +205,50 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 parse_string :: proc(p: ^Parser_State) -> (u32, Error) {
 	p.pos += 1
 	start := p.pos
-	rest := p.input[start:]
 
-	n := strings.index_byte(rest, '"')
-	if n < 0 {
-		return 0, .Invalid_JSON
+	has_escape := false
+	for p.pos + 16 <= len(p.input) {
+		chunk := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(p.input[p.pos:]))
+		eq_quote := simd.lanes_eq(chunk, SIMD_QUOTE)
+		eq_bslash := simd.lanes_eq(chunk, SIMD_BSLASH)
+		interesting := eq_quote | eq_bslash
+		if simd.reduce_or(interesting) != 0 {
+			bits := transmute(u16)simd.extract_msbs(interesting)
+			offset := int(intrinsics.count_trailing_zeros(bits))
+			p.pos += offset
+			c := p.input[p.pos]
+			if c == '"' {
+				str := p.input[start:p.pos]
+				p.pos += 1
+				type := Value_Type.String if !has_escape else Value_Type.Raw_String
+				return add_value(p, Lazy_Value{type = type, data = {str = str}}), .OK
+			}
+			has_escape = true
+			p.pos += 1
+			if p.pos >= len(p.input) {
+				return 0, .Invalid_JSON
+			}
+			if p.input[p.pos] == 'u' {
+				p.pos += 4
+				if p.pos > len(p.input) {
+					return 0, .Invalid_JSON
+				}
+			}
+			p.pos += 1
+			continue
+		}
+		p.pos += 16
 	}
-
-	if n == 0 || rest[n - 1] != '\\' {
-		str := rest[:n]
-		p.pos = start + n + 1
-		has_escapes := strings.index_byte(str, '\\') >= 0
-		type := Value_Type.String if !has_escapes else Value_Type.Raw_String
-		return add_value(p, Lazy_Value{type = type, data = {str = str}}), .OK
-	}
-
 	for p.pos < len(p.input) {
 		c := p.input[p.pos]
 		if c == '"' {
 			str := p.input[start:p.pos]
 			p.pos += 1
-			return add_value(p, Lazy_Value{type = .Raw_String, data = {str = str}}), .OK
+			type := Value_Type.String if !has_escape else Value_Type.Raw_String
+			return add_value(p, Lazy_Value{type = type, data = {str = str}}), .OK
 		}
 		if c == '\\' {
+			has_escape = true
 			p.pos += 1
 			if p.pos >= len(p.input) {
 				return 0, .Invalid_JSON
@@ -241,17 +269,37 @@ parse_string :: proc(p: ^Parser_State) -> (u32, Error) {
 parse_raw_key :: proc(p: ^Parser_State) -> (string, Error) {
 	p.pos += 1
 	start := p.pos
-	rest := p.input[start:]
 
-	n := strings.index_byte(rest, '"')
-	if n < 0 {
-		return "", .Invalid_JSON
+	for p.pos + 16 <= len(p.input) {
+		chunk := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(p.input[p.pos:]))
+		eq_quote := simd.lanes_eq(chunk, SIMD_QUOTE)
+		eq_bslash := simd.lanes_eq(chunk, SIMD_BSLASH)
+		interesting := eq_quote | eq_bslash
+		if simd.reduce_or(interesting) != 0 {
+			bits := transmute(u16)simd.extract_msbs(interesting)
+			offset := int(intrinsics.count_trailing_zeros(bits))
+			p.pos += offset
+			c := p.input[p.pos]
+			if c == '"' {
+				key := p.input[start:p.pos]
+				p.pos += 1
+				return key, .OK
+			}
+			p.pos += 1
+			if p.pos >= len(p.input) {
+				return "", .Invalid_JSON
+			}
+			if p.input[p.pos] == 'u' {
+				p.pos += 4
+				if p.pos > len(p.input) {
+					return "", .Invalid_JSON
+				}
+			}
+			p.pos += 1
+			continue
+		}
+		p.pos += 16
 	}
-	if n == 0 || rest[n - 1] != '\\' {
-		p.pos = start + n + 1
-		return rest[:n], .OK
-	}
-
 	for p.pos < len(p.input) {
 		c := p.input[p.pos]
 		if c == '"' {
@@ -279,6 +327,24 @@ parse_raw_key :: proc(p: ^Parser_State) -> (string, Error) {
 
 parse_number :: proc(p: ^Parser_State) -> (u32, Error) {
 	start := p.pos
+	for p.pos + 16 <= len(p.input) {
+		chunk := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(p.input[p.pos:]))
+		is_digit := simd.lanes_ge(chunk, SIMD_ZERO) & simd.lanes_le(chunk, SIMD_NINE)
+		is_num :=
+			is_digit |
+			simd.lanes_eq(chunk, SIMD_DOT) |
+			simd.lanes_eq(chunk, SIMD_MINUS) |
+			simd.lanes_eq(chunk, SIMD_PLUS) |
+			simd.lanes_eq(chunk, SIMD_E_LOW) |
+			simd.lanes_eq(chunk, SIMD_E_UP)
+		not_num := ~is_num
+		if simd.reduce_or(not_num) != 0 {
+			bits := transmute(u16)simd.extract_msbs(not_num)
+			p.pos += int(intrinsics.count_trailing_zeros(bits))
+			break
+		}
+		p.pos += 16
+	}
 	for p.pos < len(p.input) {
 		c := p.input[p.pos]
 		if (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E' {
@@ -293,8 +359,16 @@ parse_number :: proc(p: ^Parser_State) -> (u32, Error) {
 	return add_value(p, Lazy_Value{type = .Number, data = {str = p.input[start:p.pos]}}), .OK
 }
 
+WORD_TRUE :: 0x65_75_72_74
+WORD_NULL :: 0x6c_6c_75_6e
+WORD_FALS :: 0x73_6c_61_66
+
 parse_true :: proc(p: ^Parser_State) -> (u32, Error) {
-	if p.pos + 4 > len(p.input) || p.input[p.pos:p.pos + 4] != "true" {
+	if p.pos + 4 > len(p.input) {
+		return 0, .Invalid_JSON
+	}
+	word := intrinsics.unaligned_load(cast(^u32le)raw_data(p.input[p.pos:]))
+	if word != WORD_TRUE {
 		return 0, .Invalid_JSON
 	}
 	p.pos += 4
@@ -302,7 +376,11 @@ parse_true :: proc(p: ^Parser_State) -> (u32, Error) {
 }
 
 parse_false :: proc(p: ^Parser_State) -> (u32, Error) {
-	if p.pos + 5 > len(p.input) || p.input[p.pos:p.pos + 5] != "false" {
+	if p.pos + 5 > len(p.input) {
+		return 0, .Invalid_JSON
+	}
+	word := intrinsics.unaligned_load(cast(^u32le)raw_data(p.input[p.pos:]))
+	if word != WORD_FALS || p.input[p.pos + 4] != 'e' {
 		return 0, .Invalid_JSON
 	}
 	p.pos += 5
@@ -310,7 +388,11 @@ parse_false :: proc(p: ^Parser_State) -> (u32, Error) {
 }
 
 parse_null :: proc(p: ^Parser_State) -> (u32, Error) {
-	if p.pos + 4 > len(p.input) || p.input[p.pos:p.pos + 4] != "null" {
+	if p.pos + 4 > len(p.input) {
+		return 0, .Invalid_JSON
+	}
+	word := intrinsics.unaligned_load(cast(^u32le)raw_data(p.input[p.pos:]))
+	if word != WORD_NULL {
 		return 0, .Invalid_JSON
 	}
 	p.pos += 4
@@ -325,7 +407,42 @@ add_value :: #force_inline proc(p: ^Parser_State, v: Lazy_Value) -> u32 {
 	return idx
 }
 
+SIMD_SPACE: simd.u8x16 : 0x20
+SIMD_LF: simd.u8x16 : 0x0A
+SIMD_TAB: simd.u8x16 : 0x09
+SIMD_CR: simd.u8x16 : 0x0D
+SIMD_QUOTE: simd.u8x16 : '"'
+SIMD_BSLASH: simd.u8x16 : '\\'
+SIMD_ZERO: simd.u8x16 : '0'
+SIMD_NINE: simd.u8x16 : '9'
+SIMD_DOT: simd.u8x16 : '.'
+SIMD_MINUS: simd.u8x16 : '-'
+SIMD_PLUS: simd.u8x16 : '+'
+SIMD_E_LOW: simd.u8x16 : 'e'
+SIMD_E_UP: simd.u8x16 : 'E'
+
 skip_ws :: #force_inline proc(p: ^Parser_State) {
+	if p.pos < len(p.input) {
+		b := p.input[p.pos]
+		if b != ' ' && b != '\n' && b != '\t' && b != '\r' {
+			return
+		}
+	}
+	for p.pos + 16 <= len(p.input) {
+		chunk := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(p.input[p.pos:]))
+		ws :=
+			simd.lanes_eq(chunk, SIMD_SPACE) |
+			simd.lanes_eq(chunk, SIMD_LF) |
+			simd.lanes_eq(chunk, SIMD_TAB) |
+			simd.lanes_eq(chunk, SIMD_CR)
+		non_ws := ~ws
+		if simd.reduce_or(non_ws) != 0 {
+			bits := transmute(u16)simd.extract_msbs(non_ws)
+			p.pos += int(intrinsics.count_trailing_zeros(bits))
+			return
+		}
+		p.pos += 16
+	}
 	for p.pos < len(p.input) {
 		switch p.input[p.pos] {
 		case ' ', '\n', '\t', '\r':

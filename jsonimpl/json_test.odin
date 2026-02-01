@@ -1,5 +1,6 @@
 package jsonimpl
 
+import "core:strings"
 import "core:testing"
 
 @(test)
@@ -789,4 +790,88 @@ test_string_to_bool_coercion :: proc(t: ^testing.T) {
 	enabled_elem, e5 := read_bool_elem(&r, root, "enabled")
 	testing.expect_value(t, e5, Error.OK)
 	testing.expect_value(t, enabled_elem, true)
+}
+
+@(test)
+test_simd_whitespace_boundaries :: proc(t: ^testing.T) {
+	ws_counts := [?]int{0, 1, 15, 16, 17, 32, 33}
+	for n in ws_counts {
+		r: Reader
+		init_reader(&r)
+		defer destroy_reader(&r)
+
+		ws := strings.repeat(" ", n)
+		defer delete(ws)
+		json := strings.concatenate({ws, `{"v":1}`, ws})
+		defer delete(json)
+
+		err := parse(&r, transmute([]byte)json)
+		testing.expectf(t, err == .OK, "failed with %d spaces: %v", n, err)
+
+		val, val_err := read_int(&r, "v")
+		testing.expectf(t, val_err == .OK, "read failed with %d spaces", n)
+		testing.expectf(t, val == 1, "wrong value with %d spaces: %v", n, val)
+	}
+}
+
+@(test)
+test_simd_number_boundaries :: proc(t: ^testing.T) {
+	numbers := [?]string {
+		"1",
+		"123456789012345",
+		"1234567890123456",
+		"12345678901234567",
+		"12345678901234567890",
+	}
+	for num in numbers {
+		r: Reader
+		init_reader(&r)
+		defer destroy_reader(&r)
+
+		json := strings.concatenate({`{"n":`, num, `}`})
+		defer delete(json)
+
+		err := parse(&r, transmute([]byte)json)
+		testing.expectf(t, err == .OK, "failed parsing number len %d: %v", len(num), err)
+	}
+}
+
+@(test)
+test_simd_string_boundaries :: proc(t: ^testing.T) {
+	str_lens := [?]int{14, 15, 16, 17, 31, 32, 33}
+	for n in str_lens {
+		r: Reader
+		init_reader(&r)
+		defer destroy_reader(&r)
+
+		s := strings.repeat("a", n)
+		defer delete(s)
+		json := strings.concatenate({`{"k":"`, s, `"}`})
+		defer delete(json)
+
+		err := parse(&r, transmute([]byte)json)
+		testing.expectf(t, err == .OK, "failed with string len %d: %v", n, err)
+
+		val, val_err := read_string(&r, "k")
+		testing.expectf(t, val_err == .OK, "read failed with string len %d", n)
+		testing.expectf(t, len(val) == n, "wrong string len: got %d expected %d", len(val), n)
+	}
+}
+
+@(test)
+test_simd_string_escape_boundaries :: proc(t: ^testing.T) {
+	escape_positions := [?]int{13, 14, 15, 16, 17}
+	for pos in escape_positions {
+		r: Reader
+		init_reader(&r)
+		defer destroy_reader(&r)
+
+		prefix := strings.repeat("a", pos)
+		defer delete(prefix)
+		json := strings.concatenate({`{"k":"`, prefix, `\"end"}`})
+		defer delete(json)
+
+		err := parse(&r, transmute([]byte)json)
+		testing.expectf(t, err == .OK, "failed with escape at pos %d: %v", pos, err)
+	}
 }
