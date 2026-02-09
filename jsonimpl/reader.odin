@@ -11,11 +11,20 @@ init_reader :: proc(r: ^Reader, size := DEFAULT_READER_SIZE, allocator := contex
 	r.max_cap = 0
 }
 
+BYTES_PER_ENTRY :: size_of(Lazy_Value) + size_of(KV) + size_of(ArrEntry)
+
 parse :: proc(r: ^Reader, data: []byte) -> Error {
 	needed_cap := max(u32(len(data) / 4), 64)
 
 	if needed_cap > r.max_cap {
-		mem.arena_free_all(&r.arena)
+		needed_bytes := int(needed_cap) * BYTES_PER_ENTRY + len(data) + 64
+		if needed_bytes > len(r.memory) {
+			delete(r.memory, r.backing_allocator)
+			r.memory = make([]byte, needed_bytes, r.backing_allocator)
+			mem.arena_init(&r.arena, r.memory)
+		} else {
+			mem.arena_free_all(&r.arena)
+		}
 		r.max_cap = needed_cap
 
 		alloc := mem.arena_allocator(&r.arena)
@@ -23,7 +32,6 @@ parse :: proc(r: ^Reader, data: []byte) -> Error {
 		r.parser.kv_buffer = make([]KV, needed_cap, alloc)
 		r.parser.arr_buffer = make([]ArrEntry, needed_cap, alloc)
 
-		assert(r.parser.values != nil, "out of memory")
 		r.buffer_offset = r.arena.offset
 	} else {
 		r.arena.offset = r.buffer_offset
