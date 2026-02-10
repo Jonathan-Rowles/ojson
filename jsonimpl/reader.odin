@@ -754,6 +754,114 @@ read_bool_value :: proc(r: ^Reader, elem: Element) -> (value: bool, err: Error) 
 	return false, .Type_Mismatch
 }
 
+read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
+	if r.parser.values == nil {
+		return "", .Not_Parsed
+	}
+	idx, found := get_idx_by_path_from(&r.parser, r.parser.root, path)
+	if !found {
+		return "", .Key_Not_Found
+	}
+	return extract_raw_value(&r.parser, idx)
+}
+
+read_raw_elem :: proc(r: ^Reader, elem: Element, field: string) -> (string, Error) {
+	if r.parser.values == nil {
+		return "", .Not_Parsed
+	}
+	idx, found := get_idx_by_path_from(&r.parser, u32(elem), field)
+	if !found {
+		return "", .Key_Not_Found
+	}
+	return extract_raw_value(&r.parser, idx)
+}
+
+@(private)
+extract_raw_value :: proc(p: ^Parser_State, idx: u32) -> (string, Error) {
+	val := p.values[idx]
+	input := p.input
+	start := int(val.input_pos)
+
+	#partial switch val.type {
+	case .Object, .Array:
+		end := scan_container_end(input, start)
+		if end < 0 {
+			return "", .Invalid_JSON
+		}
+		return input[start:end], .OK
+	case .String, .Raw_String:
+		end := scan_string_end(input, start)
+		if end < 0 {
+			return "", .Invalid_JSON
+		}
+		return input[start:end], .OK
+	case .Number:
+		return val.data.str, .OK
+	case .True:
+		return "true", .OK
+	case .False:
+		return "false", .OK
+	case .Null:
+		return "null", .OK
+	}
+	return "", .Type_Mismatch
+}
+
+@(private)
+scan_container_end :: proc(input: string, start: int) -> int {
+	if start >= len(input) {
+		return -1
+	}
+	open := input[start]
+	close: byte = '}' if open == '{' else ']'
+	depth := 1
+	in_string := false
+	i := start + 1
+	for i < len(input) && depth > 0 {
+		c := input[i]
+		if in_string {
+			if c == '\\' {
+				i += 1
+			} else if c == '"' {
+				in_string = false
+			}
+		} else {
+			if c == '"' {
+				in_string = true
+			} else if c == open {
+				depth += 1
+			} else if c == close {
+				depth -= 1
+			}
+		}
+		i += 1
+	}
+	if depth != 0 {
+		return -1
+	}
+	return i
+}
+
+@(private)
+scan_string_end :: proc(input: string, start: int) -> int {
+	if start >= len(input) || input[start] != '"' {
+		return -1
+	}
+	i := start + 1
+	for i < len(input) {
+		c := input[i]
+		if c == '\\' {
+			i += 2
+			continue
+		}
+		if c == '"' {
+			return i + 1
+		}
+		i += 1
+	}
+	return -1
+}
+
 get_by_path_from :: proc(p: ^Parser_State, start_idx: u32, path: string) -> (Lazy_Value, bool) {
 	idx, found := get_idx_by_path_from(p, start_idx, path)
 	if !found {

@@ -103,6 +103,14 @@ read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool
 	return oj.read_bool_elem(r, elem, field)
 }
 
+read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
+	return oj.read_raw(r, path)
+}
+
+read_raw_elem :: proc(r: ^Reader, elem: Element, field: string) -> (string, Error) {
+	return oj.read_raw_elem(r, elem, field)
+}
+
 init_writer :: proc(
 	buffer_size := DEFAULT_WRITE_BUFFER_SIZE,
 	allocator := context.allocator,
@@ -124,6 +132,58 @@ destroy_reader :: proc(r: ^Reader) {
 
 destroy_writer :: proc(w: ^Writer) {
 	oj.destroy_writer(w)
+}
+
+write_object_start :: proc(w: ^Writer) {
+	oj.write_object_start(w)
+}
+
+write_object_end :: proc(w: ^Writer) {
+	oj.write_object_end(w)
+}
+
+write_array_start :: proc(w: ^Writer) {
+	oj.write_array_start(w)
+}
+
+write_array_end :: proc(w: ^Writer) {
+	oj.write_array_end(w)
+}
+
+write_key :: proc(w: ^Writer, k: string) {
+	oj.write_key(w, k)
+}
+
+write_string :: proc(w: ^Writer, s: string) {
+	oj.write_string(w, s)
+}
+
+write_int :: proc(w: ^Writer, v: int) {
+	oj.write_int(w, v)
+}
+
+write_f32 :: proc(w: ^Writer, v: f32) {
+	oj.write_f32(w, v)
+}
+
+write_bool :: proc(w: ^Writer, v: bool) {
+	oj.write_bool(w, v)
+}
+
+write_null :: proc(w: ^Writer) {
+	oj.write_null(w)
+}
+
+write_raw :: proc(w: ^Writer, json: string) {
+	oj.write_raw(w, json)
+}
+
+writer_reset :: proc(w: ^Writer) {
+	oj.writer_reset(w)
+}
+
+writer_string :: proc(w: ^Writer) -> string {
+	return oj.writer_string(w)
 }
 
 destroy :: proc {

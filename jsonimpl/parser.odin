@@ -68,6 +68,7 @@ parse_value :: proc(p: ^Parser_State) -> (u32, Error) {
 }
 
 parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
+	start_pos := u32(p.pos)
 	p.pos += 1
 	skip_ws(p)
 
@@ -83,6 +84,7 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 		p.pos += 1
 		p.values[obj_idx] = Lazy_Value {
 			type = .Object,
+			input_pos = start_pos,
 			data = {container = 0},
 		}
 		return obj_idx, .OK
@@ -138,12 +140,14 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 
 	p.values[obj_idx] = Lazy_Value {
 		type = .Object,
+		input_pos = start_pos,
 		data = {container = kv_count},
 	}
 	return obj_idx, .OK
 }
 
 parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
+	start_pos := u32(p.pos)
 	p.pos += 1
 	skip_ws(p)
 
@@ -159,6 +163,7 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 		p.pos += 1
 		p.values[arr_idx] = Lazy_Value {
 			type = .Array,
+			input_pos = start_pos,
 			data = {container = 0},
 		}
 		return arr_idx, .OK
@@ -197,12 +202,14 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 
 	p.values[arr_idx] = Lazy_Value {
 		type = .Array,
+		input_pos = start_pos,
 		data = {container = child_count},
 	}
 	return arr_idx, .OK
 }
 
 parse_string :: proc(p: ^Parser_State) -> (u32, Error) {
+	str_start := u32(p.pos)
 	p.pos += 1
 	start := p.pos
 
@@ -221,7 +228,11 @@ parse_string :: proc(p: ^Parser_State) -> (u32, Error) {
 				str := p.input[start:p.pos]
 				p.pos += 1
 				type := Value_Type.String if !has_escape else Value_Type.Raw_String
-				return add_value(p, Lazy_Value{type = type, data = {str = str}}), .OK
+				return add_value(
+						p,
+						Lazy_Value{type = type, input_pos = str_start, data = {str = str}},
+					),
+					.OK
 			}
 			has_escape = true
 			p.pos += 1
@@ -245,7 +256,11 @@ parse_string :: proc(p: ^Parser_State) -> (u32, Error) {
 			str := p.input[start:p.pos]
 			p.pos += 1
 			type := Value_Type.String if !has_escape else Value_Type.Raw_String
-			return add_value(p, Lazy_Value{type = type, data = {str = str}}), .OK
+			return add_value(
+					p,
+					Lazy_Value{type = type, input_pos = str_start, data = {str = str}},
+				),
+				.OK
 		}
 		if c == '\\' {
 			has_escape = true
@@ -356,7 +371,15 @@ parse_number :: proc(p: ^Parser_State) -> (u32, Error) {
 	if p.pos == start {
 		return 0, .Invalid_JSON
 	}
-	return add_value(p, Lazy_Value{type = .Number, data = {str = p.input[start:p.pos]}}), .OK
+	return add_value(
+			p,
+			Lazy_Value {
+				type = .Number,
+				input_pos = u32(start),
+				data = {str = p.input[start:p.pos]},
+			},
+		),
+		.OK
 }
 
 WORD_TRUE :: 0x65_75_72_74
@@ -371,8 +394,9 @@ parse_true :: proc(p: ^Parser_State) -> (u32, Error) {
 	if word != WORD_TRUE {
 		return 0, .Invalid_JSON
 	}
+	start_pos := u32(p.pos)
 	p.pos += 4
-	return add_value(p, Lazy_Value{type = .True}), .OK
+	return add_value(p, Lazy_Value{type = .True, input_pos = start_pos}), .OK
 }
 
 parse_false :: proc(p: ^Parser_State) -> (u32, Error) {
@@ -383,8 +407,9 @@ parse_false :: proc(p: ^Parser_State) -> (u32, Error) {
 	if word != WORD_FALS || p.input[p.pos + 4] != 'e' {
 		return 0, .Invalid_JSON
 	}
+	start_pos := u32(p.pos)
 	p.pos += 5
-	return add_value(p, Lazy_Value{type = .False}), .OK
+	return add_value(p, Lazy_Value{type = .False, input_pos = start_pos}), .OK
 }
 
 parse_null :: proc(p: ^Parser_State) -> (u32, Error) {
@@ -395,8 +420,9 @@ parse_null :: proc(p: ^Parser_State) -> (u32, Error) {
 	if word != WORD_NULL {
 		return 0, .Invalid_JSON
 	}
+	start_pos := u32(p.pos)
 	p.pos += 4
-	return add_value(p, Lazy_Value{type = .Null}), .OK
+	return add_value(p, Lazy_Value{type = .Null, input_pos = start_pos}), .OK
 }
 
 add_value :: #force_inline proc(p: ^Parser_State, v: Lazy_Value) -> u32 {

@@ -29,8 +29,9 @@ Value_Type :: enum u8 {
 }
 
 Lazy_Value :: struct {
-	type: Value_Type,
-	data: struct #raw_union {
+	type:      Value_Type,
+	input_pos: u32,
+	data:      struct #raw_union {
 		str:       string,
 		container: u32,
 	},
@@ -72,6 +73,8 @@ Reader :: struct {
 Writer :: struct {
 	buffer:    bytes.Buffer,
 	allocator: mem.Allocator,
+	depth:     int,
+	needs_sep: [64]bool,
 }
 
 destroy :: proc {
