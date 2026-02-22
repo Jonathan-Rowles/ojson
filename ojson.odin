@@ -99,6 +99,10 @@ read_f64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: f64, 
 	return oj.read_f64_elem(r, elem, field)
 }
 
+read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
+	return oj.read_f64_value(r, elem)
+}
+
 read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool, err: Error) {
 	return oj.read_bool_elem(r, elem, field)
 }
