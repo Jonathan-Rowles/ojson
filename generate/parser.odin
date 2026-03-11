@@ -15,8 +15,8 @@ get_package_name :: proc(
 	name: string,
 	ok: bool,
 ) {
-	data, read_ok := os.read_entire_file(file_path, allocator)
-	if !read_ok {
+	data, read_err := os.read_entire_file(file_path, allocator)
+	if read_err != nil {
 		return "", false
 	}
 
@@ -50,8 +50,8 @@ parse_file :: proc(
 ) {
 	structs = make([dynamic]Struct_Info, allocator)
 
-	data, read_ok := os.read_entire_file(file_path, allocator)
-	if !read_ok {
+	data, read_err := os.read_entire_file(file_path, allocator)
+	if read_err != nil {
 		return structs, "", false
 	}
 

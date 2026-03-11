@@ -46,7 +46,7 @@ main :: proc() {
 
 	all_structs := make([dynamic]Struct_Info)
 	output_dir := fp.dir(opts.output)
-	abs_output_dir, _ := fp.abs(output_dir)
+	abs_output_dir, _ := fp.abs(output_dir, context.allocator)
 
 	all_parsed_structs := make(map[string]Struct_Info, allocator = context.allocator)
 	defer delete(all_parsed_structs)
@@ -60,7 +60,7 @@ main :: proc() {
 			continue
 		}
 
-		abs_file, _ := fp.abs(file)
+		abs_file, _ := fp.abs(file, context.allocator)
 		source_dir := fp.dir(abs_file)
 
 		for &info in structs {
@@ -122,9 +122,9 @@ main :: proc() {
 	exe_path := os.args[0]
 	exe_dir := fp.dir(exe_path)
 	ojson_root := fp.dir(exe_dir)
-	ojson_jsonimpl := fp.join({ojson_root, "jsonimpl"})
+	ojson_jsonimpl, _ := fp.join({ojson_root, "jsonimpl"}, context.allocator)
 
-	abs_ojson, _ := fp.abs(ojson_jsonimpl)
+	abs_ojson, _ := fp.abs(ojson_jsonimpl, context.allocator)
 	ojson_import, _ := fp.rel(abs_output_dir, abs_ojson)
 
 	if opts.verbose {
@@ -139,8 +139,8 @@ main :: proc() {
 		os.make_directory(output_dir)
 	}
 
-	write_ok := os.write_entire_file(opts.output, transmute([]byte)code)
-	if !write_ok {
+	write_err := os.write_entire_file(opts.output, transmute([]byte)code)
+	if write_err != nil {
 		fmt.eprintfln("Error: Could not write output file: %s", opts.output)
 		os.exit(1)
 	}

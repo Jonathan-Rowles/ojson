@@ -14,12 +14,12 @@ find_odin_files :: proc(
 ) {
 	files = make([dynamic]string, allocator)
 
-	info, err := os.stat(path)
+	info, err := os.stat(path, allocator)
 	if err != nil {
 		return files, false
 	}
 
-	if !info.is_dir {
+	if info.type != .Directory {
 		if strings.has_suffix(path, ".odin") && !strings.has_suffix(path, "_test.odin") {
 			append(&files, strings.clone(path, allocator))
 		}
@@ -42,19 +42,19 @@ scan_directory :: proc(dir: string, files: ^[dynamic]string, allocator := contex
 	}
 	defer os.close(handle)
 
-	entries, read_err := os.read_dir(handle, -1)
+	entries, read_err := os.read_dir(handle, -1, allocator)
 	if read_err != nil {
 		return
 	}
-	defer os.file_info_slice_delete(entries)
+	defer os.file_info_slice_delete(entries, allocator)
 
 	for entry in entries {
-		if entry.is_dir {
+		if entry.type == .Directory {
 			continue
 		}
 		if strings.has_suffix(entry.name, ".odin") &&
 		   !strings.has_suffix(entry.name, "_test.odin") {
-			full_path := filepath.join({dir, entry.name}, allocator)
+			full_path, _ := filepath.join({dir, entry.name}, allocator)
 			append(files, full_path)
 		}
 	}
@@ -71,16 +71,16 @@ scan_directory_recursive :: proc(
 	}
 	defer os.close(handle)
 
-	entries, read_err := os.read_dir(handle, -1)
+	entries, read_err := os.read_dir(handle, -1, allocator)
 	if read_err != nil {
 		return
 	}
-	defer os.file_info_slice_delete(entries)
+	defer os.file_info_slice_delete(entries, allocator)
 
 	for entry in entries {
-		full_path := filepath.join({dir, entry.name}, allocator)
+		full_path, _ := filepath.join({dir, entry.name}, allocator)
 
-		if entry.is_dir {
+		if entry.type == .Directory {
 			if strings.has_prefix(entry.name, ".") || entry.name == "bin" {
 				delete(full_path, allocator)
 				continue
