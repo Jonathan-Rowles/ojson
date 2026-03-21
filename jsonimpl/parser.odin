@@ -20,9 +20,6 @@ parser_parse :: proc(p: ^Parser_State, input: string) -> Error {
 	p.root = root_idx
 
 	skip_ws(p)
-	if p.pos < len(p.input) {
-		return .Invalid_JSON
-	}
 
 	return .OK
 }
