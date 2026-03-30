@@ -1,3 +1,4 @@
+#+build !js
 package jsonimpl
 
 import "core:strings"
