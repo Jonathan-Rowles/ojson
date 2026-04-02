@@ -612,3 +612,81 @@ Group :: struct {
 	testing.expect_value(t, structs[0].fields[0].type_kind, Type_Kind.Dynamic_Primitive)
 	testing.expect_value(t, structs[0].fields[0].element_type, "int")
 }
+
+@(test)
+test_parse_fixed_array_with_named_constant :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 65536))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	g_constants = make(map[string]int, allocator = alloc)
+
+	source :=
+		`package test
+
+MAX_PLAYERS :: 2
+
+Player_State :: struct {
+	score: int ` +
+		"`json:\"score\"`" +
+		`,
+}
+
+Round_End_Data :: struct {
+	winner_id: int                        ` +
+		"`json:\"winner_id\"`" +
+		`,
+	players:   [MAX_PLAYERS]Player_State  ` +
+		"`json:\"players\"`" +
+		`,
+}
+`
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	collect_constants(file.decls[:])
+
+	structs := make([dynamic]Struct_Info, alloc)
+	for decl in file.decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			process_value_decl(d, &structs, alloc)
+		}
+	}
+
+	round_idx := -1
+	for info, i in structs {
+		if info.name == "Round_End_Data" {
+			round_idx = i
+			break
+		}
+	}
+	testing.expect(t, round_idx >= 0, "should find Round_End_Data struct")
+
+	round := structs[round_idx]
+	players_idx := -1
+	for field, i in round.fields {
+		if field.odin_name == "players" {
+			players_idx = i
+			break
+		}
+	}
+	testing.expect(t, players_idx >= 0, "should find players field")
+
+	players := round.fields[players_idx]
+	testing.expect_value(t, players.type_kind, Type_Kind.Fixed_Array_Struct)
+	testing.expect_value(t, players.array_size, 2)
+	testing.expect_value(t, players.element_type, "Player_State")
+}

@@ -70,6 +70,8 @@ parse_file :: proc(
 
 	pkg_name = file.pkg_name != "" ? strings.clone(file.pkg_name, allocator) : ""
 
+	collect_constants(file.decls[:])
+
 	for decl in file.decls {
 		#partial switch d in decl.derived {
 		case ^ast.Value_Decl:
@@ -248,16 +250,71 @@ determine_type_kind :: proc(
 	return .Unknown, "", "", 0
 }
 
-parse_array_length :: proc(expr: ^ast.Expr) -> int {
+g_constants: map[string]int
+
+collect_file_constants :: proc(file_path: string, allocator := context.allocator) -> bool {
+	data, read_err := os.read_entire_file(file_path, allocator)
+	if read_err != nil {
+		return false
+	}
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = string(data)
+	file.fullpath = file_path
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	if !parser.parse_file(&p, file) {
+		return false
+	}
+
+	collect_constants(file.decls[:])
+	return true
+}
+
+collect_constants :: proc(decls: []^ast.Stmt) {
+	for decl in decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			if len(d.names) == 0 || len(d.values) == 0 {
+				continue
+			}
+			if !d.is_mutable {
+				#partial switch n in d.names[0].derived {
+				case ^ast.Ident:
+					val, ok := eval_const_expr(d.values[0])
+					if ok {
+						g_constants[n.name] = val
+					}
+				}
+			}
+		}
+	}
+}
+
+eval_const_expr :: proc(expr: ^ast.Expr) -> (int, bool) {
 	if expr == nil {
-		return 0
+		return 0, false
 	}
 	#partial switch e in expr.derived {
 	case ^ast.Basic_Lit:
 		val, ok := strconv.parse_int(e.tok.text)
-		if ok {
-			return val
+		return val, ok
+	case ^ast.Ident:
+		if val, found := g_constants[e.name]; found {
+			return val, true
 		}
+	}
+	return 0, false
+}
+
+parse_array_length :: proc(expr: ^ast.Expr) -> int {
+	val, ok := eval_const_expr(expr)
+	if ok {
+		return val
 	}
 	return 0
 }

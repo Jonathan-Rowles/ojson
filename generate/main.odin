@@ -48,6 +48,17 @@ main :: proc() {
 	output_dir := fp.dir(opts.output)
 	abs_output_dir, _ := fp.abs(output_dir, context.allocator)
 
+	g_constants = make(map[string]int, allocator = context.allocator)
+	defer delete(g_constants)
+
+	for file in files {
+		collect_file_constants(file)
+	}
+
+	if opts.verbose && len(g_constants) > 0 {
+		fmt.printfln("Found %d constant(s)", len(g_constants))
+	}
+
 	all_parsed_structs := make(map[string]Struct_Info, allocator = context.allocator)
 	defer delete(all_parsed_structs)
 
