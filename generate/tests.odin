@@ -7,14 +7,22 @@ import "core:odin/tokenizer"
 import "core:strings"
 import "core:testing"
 
+@(init)
+ensure_tokenizer_init :: proc "contextless" () {
+	context = {}
+	t: tokenizer.Tokenizer
+	tokenizer.init(&t, " ", "")
+}
+
 @(test)
 test_parse_json_tag_simple :: proc(t: ^testing.T) {
 	tag: tokenizer.Token
 	tag.text = `json:"name"`
 
-	name, ok := parse_json_tag(tag)
+	name, omitempty, ok := parse_json_tag(tag)
 	testing.expect(t, ok, "expected tag to be parsed")
 	testing.expect_value(t, name, "name")
+	testing.expect(t, !omitempty, "should not have omitempty")
 }
 
 @(test)
@@ -22,7 +30,7 @@ test_parse_json_tag_with_backticks :: proc(t: ^testing.T) {
 	tag: tokenizer.Token
 	tag.text = "`json:\"field_name\"`"
 
-	name, ok := parse_json_tag(tag)
+	name, _, ok := parse_json_tag(tag)
 	testing.expect(t, ok, "expected tag to be parsed")
 	testing.expect_value(t, name, "field_name")
 }
@@ -32,9 +40,20 @@ test_parse_json_tag_with_omitempty :: proc(t: ^testing.T) {
 	tag: tokenizer.Token
 	tag.text = `json:"value,omitempty"`
 
-	name, ok := parse_json_tag(tag)
+	name, omitempty, ok := parse_json_tag(tag)
 	testing.expect(t, ok, "expected tag to be parsed")
 	testing.expect_value(t, name, "value")
+	testing.expect(t, omitempty, "should have omitempty")
+}
+
+@(test)
+test_parse_json_tag_without_omitempty :: proc(t: ^testing.T) {
+	tag: tokenizer.Token
+	tag.text = `json:"value"`
+
+	_, omitempty, ok := parse_json_tag(tag)
+	testing.expect(t, ok, "expected tag to be parsed")
+	testing.expect(t, !omitempty, "should not have omitempty")
 }
 
 @(test)
@@ -42,7 +61,7 @@ test_parse_json_tag_no_json :: proc(t: ^testing.T) {
 	tag: tokenizer.Token
 	tag.text = `xml:"data"`
 
-	_, ok := parse_json_tag(tag)
+	_, _, ok := parse_json_tag(tag)
 	testing.expect(t, !ok, "expected no json tag")
 }
 
@@ -51,7 +70,7 @@ test_parse_json_tag_empty :: proc(t: ^testing.T) {
 	tag: tokenizer.Token
 	tag.text = ""
 
-	_, ok := parse_json_tag(tag)
+	_, _, ok := parse_json_tag(tag)
 	testing.expect(t, !ok, "expected no json tag")
 }
 
@@ -689,4 +708,1008 @@ Round_End_Data :: struct {
 	testing.expect_value(t, players.type_kind, Type_Kind.Fixed_Array_Struct)
 	testing.expect_value(t, players.array_size, 2)
 	testing.expect_value(t, players.element_type, "Player_State")
+}
+
+@(test)
+test_marshal_simple_struct :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "User",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "name",
+			json_name = "name",
+			type_kind = .String,
+			type_name = "string",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "age", json_name = "age", type_kind = .Int, type_name = "int"},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "marshal_user"), "should contain marshal_user")
+	testing.expect(t, strings.contains(code, "write_object_start"), "should start object")
+	testing.expect(t, strings.contains(code, "write_object_end"), "should end object")
+	testing.expect(t, strings.contains(code, `write_key(w, "name")`), "should write name key")
+	testing.expect(
+		t,
+		strings.contains(code, "write_string(w, value.name)"),
+		"should write string field",
+	)
+	testing.expect(t, strings.contains(code, `write_key(w, "age")`), "should write age key")
+	testing.expect(t, strings.contains(code, "write_int(w, value.age)"), "should write int field")
+}
+
+@(test)
+test_marshal_nested_struct :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Order",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info{odin_name = "id", json_name = "id", type_kind = .Int, type_name = "int"},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "user",
+			json_name = "user",
+			type_kind = .Struct,
+			type_name = "User",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "marshal_order"), "should contain marshal_order")
+	testing.expect(t, strings.contains(code, `write_key(w, "user")`), "should write user key")
+	testing.expect(
+		t,
+		strings.contains(code, "marshal_user(w, value.user)"),
+		"should call nested marshal",
+	)
+}
+
+@(test)
+test_marshal_integer_cast_types :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "IntTypes",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info{odin_name = "a", json_name = "a", type_kind = .I8, type_name = "i8"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "b", json_name = "b", type_kind = .I16, type_name = "i16"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "c", json_name = "c", type_kind = .I32, type_name = "i32"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "d", json_name = "d", type_kind = .I64, type_name = "i64"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "e", json_name = "e", type_kind = .U8, type_name = "u8"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "f", json_name = "f", type_kind = .U16, type_name = "u16"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "g", json_name = "g", type_kind = .U32, type_name = "u32"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "h", json_name = "h", type_kind = .U64, type_name = "u64"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "i", json_name = "i", type_kind = .Uint, type_name = "uint"},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.a))"),
+		"should cast i8 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.b))"),
+		"should cast i16 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.c))"),
+		"should cast i32 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.d))"),
+		"should cast i64 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.e))"),
+		"should cast u8 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.f))"),
+		"should cast u16 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.g))"),
+		"should cast u32 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.h))"),
+		"should cast u64 to int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.i))"),
+		"should cast uint to int",
+	)
+}
+
+@(test)
+test_marshal_float_types :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "FloatTypes",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info{odin_name = "a", json_name = "a", type_kind = .F16, type_name = "f16"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "b", json_name = "b", type_kind = .F32, type_name = "f32"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "c", json_name = "c", type_kind = .F64, type_name = "f64"},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "write_f32(w, f32(value.a))"),
+		"should cast f16 to f32",
+	)
+	testing.expect(t, strings.contains(code, "write_f32(w, value.b)"), "should write f32 directly")
+	testing.expect(t, strings.contains(code, "write_f64(w, value.c)"), "should write f64")
+}
+
+@(test)
+test_marshal_bool :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Flags",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "active",
+			json_name = "active",
+			type_kind = .Bool,
+			type_name = "bool",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "write_bool(w, value.active)"),
+		"should write bool field",
+	)
+}
+
+@(test)
+test_marshal_enum :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "status",
+			json_name = "status",
+			type_kind = .Enum,
+			type_name = "Status",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.status))"),
+		"should cast enum to int",
+	)
+}
+
+@(test)
+test_marshal_distinct :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "id",
+			json_name = "id",
+			type_kind = .Distinct,
+			type_name = "Entity_ID",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(value.id))"),
+		"should cast distinct to int",
+	)
+}
+
+@(test)
+test_marshal_array_primitive :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "values",
+			json_name = "values",
+			type_kind = .Array_Primitive,
+			type_name = "slice",
+			element_type = "int",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, `write_key(w, "values")`), "should write key")
+	testing.expect(t, strings.contains(code, "write_array_start"), "should start array")
+	testing.expect(t, strings.contains(code, "write_array_end"), "should end array")
+	testing.expect(t, strings.contains(code, "for item in value.values"), "should iterate slice")
+	testing.expect(t, strings.contains(code, "write_int(w, item)"), "should write int elements")
+}
+
+@(test)
+test_marshal_array_string :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "tags",
+			json_name = "tags",
+			type_kind = .Array_Primitive,
+			type_name = "slice",
+			element_type = "string",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "write_string(w, item)"),
+		"should write string elements",
+	)
+}
+
+@(test)
+test_marshal_array_struct :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Group",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "users",
+			json_name = "users",
+			type_kind = .Array_Struct,
+			type_name = "slice",
+			element_type = "User",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "write_array_start"), "should start array")
+	testing.expect(
+		t,
+		strings.contains(code, "marshal_user(w, item)"),
+		"should marshal each struct",
+	)
+	testing.expect(t, strings.contains(code, "write_array_end"), "should end array")
+}
+
+@(test)
+test_marshal_dynamic_primitive :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "items",
+			json_name = "items",
+			type_kind = .Dynamic_Primitive,
+			type_name = "dynamic",
+			element_type = "f64",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "write_array_start"), "should start array")
+	testing.expect(
+		t,
+		strings.contains(code, "for item in value.items"),
+		"should iterate dynamic array",
+	)
+	testing.expect(t, strings.contains(code, "write_f64(w, item)"), "should write f64 elements")
+	testing.expect(t, strings.contains(code, "write_array_end"), "should end array")
+}
+
+@(test)
+test_marshal_dynamic_struct :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Team",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "members",
+			json_name = "members",
+			type_kind = .Dynamic_Struct,
+			type_name = "dynamic",
+			element_type = "Player",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "for item in value.members"), "should iterate")
+	testing.expect(
+		t,
+		strings.contains(code, "marshal_player(w, item)"),
+		"should marshal each struct",
+	)
+}
+
+@(test)
+test_marshal_fixed_array_primitive :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "tags",
+			json_name = "tags",
+			type_kind = .Fixed_Array_Primitive,
+			type_name = "fixed",
+			element_type = "string",
+			array_size = 5,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "write_array_start"), "should start array")
+	testing.expect(
+		t,
+		strings.contains(code, "for item in value.tags"),
+		"should iterate fixed array",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_string(w, item)"),
+		"should write string elements",
+	)
+	testing.expect(t, strings.contains(code, "write_array_end"), "should end array")
+}
+
+@(test)
+test_marshal_fixed_array_struct :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Round",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "players",
+			json_name = "players",
+			type_kind = .Fixed_Array_Struct,
+			type_name = "fixed",
+			element_type = "Player",
+			array_size = 4,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "for item in value.players"),
+		"should iterate fixed array",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "marshal_player(w, item)"),
+		"should marshal each struct",
+	)
+}
+
+@(test)
+test_marshal_array_cast_element :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "ids",
+			json_name = "ids",
+			type_kind = .Array_Primitive,
+			type_name = "slice",
+			element_type = "u32",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(item))"),
+		"should cast u32 elements to int",
+	)
+}
+
+@(test)
+test_marshal_array_float_element :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "weights",
+			json_name = "weights",
+			type_kind = .Array_Primitive,
+			type_name = "slice",
+			element_type = "f32",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "write_f32(w, item)"), "should write f32 elements")
+}
+
+@(test)
+test_marshal_different_json_name :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Config",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "max_retries",
+			json_name = "maxRetries",
+			type_kind = .Int,
+			type_name = "int",
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, `write_key(w, "maxRetries")`),
+		"should use json name for key",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "value.max_retries"),
+		"should use odin name for field access",
+	)
+}
+
+@(test)
+test_marshal_with_ojson_prefix :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "User",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "name",
+			json_name = "name",
+			type_kind = .String,
+			type_name = "string",
+		},
+	)
+
+	code := generate_code({info}, "gen", "", "../jsonimpl", alloc)
+
+	testing.expect(t, strings.contains(code, "oj.write_object_start"), "should prefix with oj.")
+	testing.expect(t, strings.contains(code, "oj.write_string"), "should prefix with oj.")
+	testing.expect(t, strings.contains(code, "oj.Writer"), "should use oj.Writer type")
+}
+
+@(test)
+test_marshal_all_primitives :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "AllTypes",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info{odin_name = "s", json_name = "s", type_kind = .String, type_name = "string"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "i", json_name = "i", type_kind = .Int, type_name = "int"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "i64", json_name = "i64", type_kind = .I64, type_name = "i64"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "f32", json_name = "f32", type_kind = .F32, type_name = "f32"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "f64", json_name = "f64", type_kind = .F64, type_name = "f64"},
+	)
+	append(
+		&info.fields,
+		Field_Info{odin_name = "b", json_name = "b", type_kind = .Bool, type_name = "bool"},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "write_string(w, value.s)"), "string")
+	testing.expect(t, strings.contains(code, "write_int(w, value.i)"), "int")
+	testing.expect(t, strings.contains(code, "write_int(w, int(value.i64))"), "i64")
+	testing.expect(t, strings.contains(code, "write_f32(w, value.f32)"), "f32")
+	testing.expect(t, strings.contains(code, "write_f64(w, value.f64)"), "f64")
+	testing.expect(t, strings.contains(code, "write_bool(w, value.b)"), "bool")
+}
+
+
+@(test)
+test_marshal_omitempty_string :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "User",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "name",
+			json_name = "name",
+			type_kind = .String,
+			type_name = "string",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "email",
+			json_name = "email",
+			type_kind = .String,
+			type_name = "string",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, `if value.email != ""`), "should check empty string")
+	testing.expect(
+		t,
+		!strings.contains(code, `if value.name != ""`),
+		"non-omitempty should not check",
+	)
+}
+
+@(test)
+test_marshal_omitempty_int :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "count",
+			json_name = "count",
+			type_kind = .Int,
+			type_name = "int",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "if value.count != 0"), "should check zero int")
+}
+
+@(test)
+test_marshal_omitempty_bool :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Flags",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "active",
+			json_name = "active",
+			type_kind = .Bool,
+			type_name = "bool",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "if value.active {"), "should check false bool")
+}
+
+@(test)
+test_marshal_omitempty_f64 :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "score",
+			json_name = "score",
+			type_kind = .F64,
+			type_name = "f64",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "if value.score != 0"), "should check zero f64")
+}
+
+@(test)
+test_marshal_omitempty_slice :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "tags",
+			json_name = "tags",
+			type_kind = .Array_Primitive,
+			type_name = "slice",
+			element_type = "string",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "if len(value.tags) > 0"), "should check empty slice")
+}
+
+@(test)
+test_marshal_omitempty_enum :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Data",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "status",
+			json_name = "status",
+			type_kind = .Enum,
+			type_name = "Status",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "if int(value.status) != 0"),
+		"should check zero enum",
+	)
+}
+
+@(test)
+test_marshal_omitempty_mixed :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "User",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info{odin_name = "id", json_name = "id", type_kind = .Int, type_name = "int"},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "nickname",
+			json_name = "nickname",
+			type_kind = .String,
+			type_name = "string",
+			omitempty = true,
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "age",
+			json_name = "age",
+			type_kind = .Int,
+			type_name = "int",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, `write_key(w, "id")`), "id always written")
+	testing.expect(
+		t,
+		strings.contains(code, `if value.nickname != ""`),
+		"nickname omitempty check",
+	)
+	testing.expect(t, strings.contains(code, "if value.age != 0"), "age omitempty check")
+}
+
+@(test)
+test_parse_omitempty_from_source :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 32768))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	source :=
+		`package test
+
+User :: struct {
+	name:  string ` +
+		"`json:\"name\"`" +
+		`,
+	email: string ` +
+		"`json:\"email,omitempty\"`" +
+		`,
+}
+`
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	structs := make([dynamic]Struct_Info, alloc)
+	for decl in file.decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			process_value_decl(d, &structs, alloc)
+		}
+	}
+
+	testing.expect_value(t, len(structs), 1)
+	testing.expect_value(t, len(structs[0].fields), 2)
+	testing.expect(t, !structs[0].fields[0].omitempty, "name should not be omitempty")
+	testing.expect(t, structs[0].fields[1].omitempty, "email should be omitempty")
 }

@@ -2,14 +2,15 @@
 
 **SIMD-accelerated, lazy JSON field extraction for the [Odin programming language](https://odin-lang.org/).**
 
-ojson lets you extract fields from JSON without fully deserializing the document. Includes a code generator for type-safe unmarshalling.
+ojson parses JSON lazily: it walks the full document to index structure and positions, but defers type conversion and string unescaping until you read a field. SIMD-accelerated string and number scanning. Includes a code generator for type-safe unmarshalling and marshalling.
 
 ## Features
 
-- Fast field extraction without full parse
-- Reusable reader for parsing many messages
-- Code generation for struct unmarshalling
-- Zero dependencies
+- Lazy parsing with deferred type conversion
+- SIMD-accelerated string and number scanning
+- Reusable reader that amortizes allocation across many messages
+- Code generation for struct unmarshalling and marshalling
+- `omitempty` support for skipping zero-valued fields during marshal
 
 ## Installation
 ```bash
@@ -19,29 +20,30 @@ git clone https://github.com/jonathan-rowles/ojson
 
 ## Usage
 
-## Reusable Reader
+### Reusable Reader
 
 For parsing many messages:
 
 ```odin
 import oj "ojson"
 
-reader := oj.init_reader()
-defer oj.destroy(&reader)
+r: oj.Reader
+oj.init_reader(&r)
+defer oj.destroy(&r)
 
 for msg in messages {
-    oj.parse(&reader, msg)
+    oj.parse(&r, msg)
 
-    name, _ := oj.read_string(&reader, "users.0.name")
+    name, _ := oj.read_string(&r, "users.0.name")
 
-    items, _ := oj.array_elements(&reader, "items")
+    items, _ := oj.array_elements(&r, "items")
     for item in items {
-        price, _ := oj.read_f64_elem(&reader, item, "price")
+        price, _ := oj.read_f64_elem(&r, item, "price")
     }
 }
 ```
 
-## One-shot
+### One-shot
 
 For single lookups:
 
@@ -49,7 +51,7 @@ For single lookups:
 name, _ := oj.get_string(data, "user.name")
 ```
 
-## Code Generation
+### Code Generation
 
 ```odin
 // types.odin
@@ -61,7 +63,7 @@ Item :: struct {
 Order :: struct {
     id:    i64       `json:"id"`,
     items: []Item    `json:"items"`,
-    tags:  [5]string `json:"tags"`,
+    note:  string    `json:"note,omitempty"`,
 }
 ```
 
@@ -69,10 +71,33 @@ Order :: struct {
 make generate SRC=../myproject/types
 ```
 
+Generates both `unmarshal_*` and `marshal_*` procs for each struct:
+
 ```odin
 import oj "ojson"
 import oj_gen "ojson/gen"
 
-oj.parse(&reader, data)
-order, err := oj_gen.unmarshal_order(&reader)
+r: oj.Reader
+oj.init_reader(&r)
+defer oj.destroy(&r)
+
+// Unmarshal
+oj.parse(&r, data)
+order, err := oj_gen.unmarshal_order(&r)
+
+// Marshal
+w := oj.init_writer()
+defer oj.destroy(&w)
+oj_gen.marshal_order(&w, order)
+result := oj.writer_string(&w)
 ```
+
+Fields tagged with `omitempty` are skipped during marshal when they have their zero value (`""` for strings, `0` for numbers, `false` for bools, empty for slices).
+
+## Not Yet Supported
+
+The following types are not currently supported by the code generator:
+
+- **Pointers (`^T`)**: detected by the parser but generated code won't compile
+- **Maps (`map[K]V`)**
+- **Unions**

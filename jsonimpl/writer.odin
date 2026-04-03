@@ -4,8 +4,6 @@ import "core:bytes"
 import stdjson "core:encoding/json"
 import "core:unicode/utf8"
 
-// TODO
-
 init_writer :: proc(
 	buffer_size := DEFAULT_WRITE_BUFFER_SIZE,
 	allocator := context.allocator,
@@ -112,6 +110,21 @@ write_f32 :: proc(w: ^Writer, v: f32) {
 	write_sep(w)
 	integer := int(v)
 	frac := int((v - f32(integer)) * 10)
+	if frac < 0 {
+		frac = -frac
+	}
+	buf: [20]byte
+	n := int_to_buf(buf[:], integer)
+	bytes.buffer_write(&w.buffer, buf[:n])
+	bytes.buffer_write_byte(&w.buffer, '.')
+	n2 := int_to_buf(buf[:], frac)
+	bytes.buffer_write(&w.buffer, buf[:n2])
+}
+
+write_f64 :: proc(w: ^Writer, v: f64) {
+	write_sep(w)
+	integer := int(v)
+	frac := int((v - f64(integer)) * 10)
 	if frac < 0 {
 		frac = -frac
 	}

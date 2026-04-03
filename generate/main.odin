@@ -15,7 +15,7 @@ Options :: struct {
 
 main :: proc() {
 	opts: Options
-	opts.output = "gen/unmarshal.gen.odin"
+	opts.output = "gen/ojson.gen.odin"
 	opts.package_name = "gen"
 	flags.parse_or_exit(&opts, os.args, .Unix)
 

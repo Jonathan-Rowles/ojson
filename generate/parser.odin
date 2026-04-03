@@ -137,7 +137,7 @@ process_field :: proc(
 	has_any_json_tag: ^bool,
 	allocator := context.allocator,
 ) {
-	json_name, has_tag := parse_json_tag(field.tag)
+	json_name, omitempty, has_tag := parse_json_tag(field.tag)
 	if has_tag {
 		has_any_json_tag^ = true
 		if json_name == "-" {
@@ -151,6 +151,7 @@ process_field :: proc(
 			field_info: Field_Info
 			field_info.odin_name = strings.clone(n.name, allocator)
 			field_info.json_name = has_tag ? json_name : strings.clone(n.name, allocator)
+			field_info.omitempty = omitempty
 			field_info.type_kind, field_info.type_name, field_info.element_type, field_info.array_size =
 				determine_type_kind(field.type, allocator)
 
@@ -159,10 +160,10 @@ process_field :: proc(
 	}
 }
 
-parse_json_tag :: proc(tag: tokenizer.Token) -> (json_name: string, ok: bool) {
+parse_json_tag :: proc(tag: tokenizer.Token) -> (json_name: string, omitempty: bool, ok: bool) {
 	text := tag.text
 	if text == "" {
-		return "", false
+		return "", false, false
 	}
 
 	if len(text) >= 2 && text[0] == '`' && text[len(text) - 1] == '`' {
@@ -172,24 +173,26 @@ parse_json_tag :: proc(tag: tokenizer.Token) -> (json_name: string, ok: bool) {
 	json_prefix := `json:"`
 	idx := strings.index(text, json_prefix)
 	if idx < 0 {
-		return "", false
+		return "", false, false
 	}
 
 	remaining := text[idx + len(json_prefix):]
 
 	end_idx := strings.index_byte(remaining, '"')
 	if end_idx < 0 {
-		return "", false
+		return "", false, false
 	}
 
 	value := remaining[:end_idx]
 
 	comma_idx := strings.index_byte(value, ',')
 	if comma_idx >= 0 {
+		options := value[comma_idx + 1:]
 		value = value[:comma_idx]
+		omitempty = strings.contains(options, "omitempty")
 	}
 
-	return value, len(value) > 0
+	return value, omitempty, len(value) > 0
 }
 
 determine_type_kind :: proc(

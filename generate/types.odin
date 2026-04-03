@@ -40,6 +40,7 @@ Field_Info :: struct {
 	element_type: string,
 	base_type:    string,
 	array_size:   int, // For fixed-size arrays like [10]T
+	omitempty:    bool,
 }
 
 Struct_Info :: struct {

@@ -170,6 +170,10 @@ write_f32 :: proc(w: ^Writer, v: f32) {
 	oj.write_f32(w, v)
 }
 
+write_f64 :: proc(w: ^Writer, v: f64) {
+	oj.write_f64(w, v)
+}
+
 write_bool :: proc(w: ^Writer, v: bool) {
 	oj.write_bool(w, v)
 }

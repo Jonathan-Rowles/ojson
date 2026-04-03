@@ -20,5 +20,5 @@ endif
 clean:
 	@rm -rf bin/
 	@rm -rf gen/
-	@rm -f unmarshal.gen.odin
+	@rm -f ojson.gen.odin
 	@echo "cleaned"
