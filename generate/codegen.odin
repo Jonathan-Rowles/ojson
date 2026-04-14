@@ -11,6 +11,7 @@ Gen_Context :: struct {
 
 generate_code :: proc(
 	structs: []Struct_Info,
+	unions: []Union_Info,
 	package_name: string,
 	output_dir: string = "",
 	ojson_import: string = "",
@@ -33,11 +34,25 @@ generate_code :: proc(
 		if info.source_package == "" || info.source_dir == "" {
 			continue
 		}
-
 		if info.source_package == package_name {
 			continue
 		}
-
+		if info.source_dir not_in packages {
+			import_path, _ := fp.rel(output_dir, info.source_dir)
+			packages[info.source_dir] = Package_Info {
+				name        = info.source_package,
+				source_dir  = info.source_dir,
+				import_path = import_path,
+			}
+		}
+	}
+	for info in unions {
+		if info.source_package == "" || info.source_dir == "" {
+			continue
+		}
+		if info.source_package == package_name {
+			continue
+		}
 		if info.source_dir not_in packages {
 			import_path, _ := fp.rel(output_dir, info.source_dir)
 			packages[info.source_dir] = Package_Info {
@@ -68,8 +83,19 @@ generate_code :: proc(
 		strings.write_string(&sb, "\n")
 	}
 
+	for info, i in unions {
+		generate_union_unmarshal(&sb, info, &ctx)
+		strings.write_string(&sb, "\n")
+		generate_union_marshal(&sb, info, &ctx)
+		if i < len(unions) - 1 || len(structs) > 0 {
+			strings.write_string(&sb, "\n")
+		}
+	}
+
 	for info, i in structs {
 		generate_unmarshal_proc(&sb, info, &ctx)
+		strings.write_string(&sb, "\n")
+		generate_is_zero_proc(&sb, info, &ctx)
 		strings.write_string(&sb, "\n")
 		generate_marshal_proc(&sb, info, &ctx)
 		if i < len(structs) - 1 {
@@ -78,6 +104,56 @@ generate_code :: proc(
 	}
 
 	return strings.to_string(sb)
+}
+
+generate_is_zero_proc :: proc(sb: ^strings.Builder, info: Struct_Info, ctx: ^Gen_Context) {
+	lower_name := to_snake_case(info.name)
+	type_prefix := get_type_prefix(info, ctx)
+	type_name := fmt.tprintf("%s%s", type_prefix, info.name)
+
+	fmt.sbprintf(sb, "is_zero_%s :: proc(v: %s) -> bool {{\n", lower_name, type_name)
+	if info.is_tuple || len(info.fields) == 0 {
+		strings.write_string(sb, "\treturn true\n")
+		strings.write_string(sb, "}\n")
+		return
+	}
+	strings.write_string(sb, "\treturn")
+	for field, i in info.fields {
+		check := is_zero_field_expr(field)
+		if i > 0 {
+			strings.write_string(sb, " &&")
+		}
+		fmt.sbprintf(sb, " %s", check)
+	}
+	strings.write_string(sb, "\n}\n")
+}
+
+is_zero_field_expr :: proc(field: Field_Info) -> string {
+	#partial switch field.type_kind {
+	case .String:
+		return fmt.tprintf(`v.%s == ""`, field.odin_name)
+	case .Int, .I64, .I8, .I16, .I32, .U8, .U16, .U32, .U64, .Uint, .F16, .F32, .F64:
+		return fmt.tprintf("v.%s == 0", field.odin_name)
+	case .Bool:
+		return fmt.tprintf("!v.%s", field.odin_name)
+	case .Enum, .Distinct:
+		return fmt.tprintf("int(v.%s) == 0", field.odin_name)
+	case .Array_Primitive, .Array_Struct, .Array_Union:
+		return fmt.tprintf("len(v.%s) == 0", field.odin_name)
+	case .Dynamic_Primitive, .Dynamic_Struct, .Dynamic_Union:
+		return fmt.tprintf("len(v.%s) == 0", field.odin_name)
+	case .Fixed_Array_Primitive, .Fixed_Array_Struct, .Fixed_Array_Union:
+		return "true"
+	case .Struct:
+		return fmt.tprintf(
+			"is_zero_%s(v.%s)",
+			to_snake_case(field.type_name),
+			field.odin_name,
+		)
+	case .Union:
+		return fmt.tprintf("v.%s == nil", field.odin_name)
+	}
+	return "true"
 }
 
 get_type_prefix :: proc(info: Struct_Info, ctx: ^Gen_Context) -> string {
@@ -253,14 +329,27 @@ generate_field_read :: proc(
 
 	switch field.type_kind {
 	case .String:
-		fmt.sbprintf(
-			sb,
-			"\tresult.%s, err = %sread_string_elem(r, elem, \"%s\")\n",
-			field.odin_name,
-			oj,
-			field.json_name,
-		)
-		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found do return\n\n")
+		if field.raw {
+			fmt.sbprintf(sb, "\t{{\n")
+			fmt.sbprintf(
+				sb,
+				"\t\traw_val, raw_err := %sread_raw_elem(r, elem, \"%s\")\n",
+				oj,
+				field.json_name,
+			)
+			strings.write_string(sb, "\t\tif raw_err != .OK && raw_err != .Key_Not_Found && raw_err != .Type_Mismatch do return result, raw_err\n")
+			fmt.sbprintf(sb, "\t\tif raw_err == .OK do result.%s = raw_val\n", field.odin_name)
+			fmt.sbprintf(sb, "\t}}\n\n")
+		} else {
+			fmt.sbprintf(
+				sb,
+				"\tresult.%s, err = %sread_string_elem(r, elem, \"%s\")\n",
+				field.odin_name,
+				oj,
+				field.json_name,
+			)
+			strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n\n")
+		}
 
 	case .Int:
 		fmt.sbprintf(
@@ -270,7 +359,7 @@ generate_field_read :: proc(
 			oj,
 			field.json_name,
 		)
-		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found do return\n\n")
+		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n\n")
 
 	case .I64:
 		fmt.sbprintf(
@@ -280,7 +369,7 @@ generate_field_read :: proc(
 			oj,
 			field.json_name,
 		)
-		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found do return\n\n")
+		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n\n")
 
 	case .F64:
 		fmt.sbprintf(
@@ -290,7 +379,7 @@ generate_field_read :: proc(
 			oj,
 			field.json_name,
 		)
-		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found do return\n\n")
+		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n\n")
 
 	case .Bool:
 		fmt.sbprintf(
@@ -300,18 +389,17 @@ generate_field_read :: proc(
 			oj,
 			field.json_name,
 		)
-		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found do return\n\n")
+		strings.write_string(sb, "\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n\n")
 
 	case .I8, .I16, .I32:
 		fmt.sbprintf(sb, "\t{{\n")
 		fmt.sbprintf(sb, "\t\tval: i64\n")
 		fmt.sbprintf(sb, "\t\tval, err = %sread_i64_elem(r, elem, \"%s\")\n", oj, field.json_name)
-		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found do return\n")
+		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n")
 		fmt.sbprintf(
 			sb,
-			"\t\tif err == .OK do result.%s = %s%s(val)\n",
+			"\t\tif err == .OK do result.%s = %s(val)\n",
 			field.odin_name,
-			tp,
 			field.type_name,
 		)
 		fmt.sbprintf(sb, "\t}}\n\n")
@@ -320,12 +408,11 @@ generate_field_read :: proc(
 		fmt.sbprintf(sb, "\t{{\n")
 		fmt.sbprintf(sb, "\t\tval: i64\n")
 		fmt.sbprintf(sb, "\t\tval, err = %sread_i64_elem(r, elem, \"%s\")\n", oj, field.json_name)
-		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found do return\n")
+		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n")
 		fmt.sbprintf(
 			sb,
-			"\t\tif err == .OK do result.%s = %s%s(val)\n",
+			"\t\tif err == .OK do result.%s = %s(val)\n",
 			field.odin_name,
-			tp,
 			field.type_name,
 		)
 		fmt.sbprintf(sb, "\t}}\n\n")
@@ -334,12 +421,11 @@ generate_field_read :: proc(
 		fmt.sbprintf(sb, "\t{{\n")
 		fmt.sbprintf(sb, "\t\tval: f64\n")
 		fmt.sbprintf(sb, "\t\tval, err = %sread_f64_elem(r, elem, \"%s\")\n", oj, field.json_name)
-		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found do return\n")
+		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n")
 		fmt.sbprintf(
 			sb,
-			"\t\tif err == .OK do result.%s = %s%s(val)\n",
+			"\t\tif err == .OK do result.%s = %s(val)\n",
 			field.odin_name,
-			tp,
 			field.type_name,
 		)
 		fmt.sbprintf(sb, "\t}}\n\n")
@@ -348,7 +434,7 @@ generate_field_read :: proc(
 		fmt.sbprintf(sb, "\t{{\n")
 		fmt.sbprintf(sb, "\t\tval: int\n")
 		fmt.sbprintf(sb, "\t\tval, err = %sread_int_elem(r, elem, \"%s\")\n", oj, field.json_name)
-		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found do return\n")
+		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n")
 		fmt.sbprintf(
 			sb,
 			"\t\tif err == .OK do result.%s = %s%s(val)\n",
@@ -362,7 +448,7 @@ generate_field_read :: proc(
 		fmt.sbprintf(sb, "\t{{\n")
 		fmt.sbprintf(sb, "\t\tval: int\n")
 		fmt.sbprintf(sb, "\t\tval, err = %sread_int_elem(r, elem, \"%s\")\n", oj, field.json_name)
-		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found do return\n")
+		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n")
 		fmt.sbprintf(
 			sb,
 			"\t\tif err == .OK do result.%s = %s%s(val)\n",
@@ -409,6 +495,12 @@ generate_field_read :: proc(
 
 	case .Fixed_Array_Struct:
 		generate_fixed_array_struct_read(sb, field, parent, ctx)
+
+	case .Union:
+		generate_union_field_read(sb, field, ctx)
+
+	case .Array_Union, .Dynamic_Union, .Fixed_Array_Union:
+		generate_union_array_read(sb, field, parent, ctx)
 
 	case .Unknown:
 		fmt.sbprintf(sb, "\t// TODO: Unknown type for field %s\n\n", field.odin_name)
@@ -792,7 +884,10 @@ to_snake_case :: proc(s: string, allocator := context.allocator) -> string {
 		c := s[i]
 		if c >= 'A' && c <= 'Z' {
 			if i > 0 {
-				strings.write_byte(&sb, '_')
+				prev := s[i - 1]
+				if (prev >= 'a' && prev <= 'z') || (prev >= '0' && prev <= '9') {
+					strings.write_byte(&sb, '_')
+				}
 			}
 			strings.write_byte(&sb, c + 32)
 		} else {
@@ -861,10 +956,18 @@ omitempty_zero_check :: proc(field: Field_Info) -> (check: string, has_check: bo
 		return fmt.tprintf("value.%s", field.odin_name), true
 	case .Enum, .Distinct:
 		return fmt.tprintf("int(value.%s) != 0", field.odin_name), true
-	case .Array_Primitive, .Array_Struct:
+	case .Array_Primitive, .Array_Struct, .Array_Union:
 		return fmt.tprintf("len(value.%s) > 0", field.odin_name), true
-	case .Dynamic_Primitive, .Dynamic_Struct:
+	case .Dynamic_Primitive, .Dynamic_Struct, .Dynamic_Union:
 		return fmt.tprintf("len(value.%s) > 0", field.odin_name), true
+	case .Struct:
+		return fmt.tprintf(
+				"!is_zero_%s(value.%s)",
+				to_snake_case(field.type_name),
+				field.odin_name,
+			), true
+	case .Union:
+		return fmt.tprintf("value.%s != nil", field.odin_name), true
 	}
 	return "", false
 }
@@ -890,7 +993,13 @@ generate_field_write :: proc(
 
 	switch field.type_kind {
 	case .String:
-		fmt.sbprintf(sb, "%s%swrite_string(w, value.%s)\n", indent, oj, field.odin_name)
+		if field.union_tag != "" {
+			fmt.sbprintf(sb, "%s%swrite_string(w, \"%s\")\n", indent, oj, field.union_tag)
+		} else if field.raw {
+			fmt.sbprintf(sb, "%s%swrite_raw(w, value.%s)\n", indent, oj, field.odin_name)
+		} else {
+			fmt.sbprintf(sb, "%s%swrite_string(w, value.%s)\n", indent, oj, field.odin_name)
+		}
 	case .Int:
 		fmt.sbprintf(sb, "%s%swrite_int(w, value.%s)\n", indent, oj, field.odin_name)
 	case .Bool:
@@ -912,6 +1021,10 @@ generate_field_write :: proc(
 		generate_array_primitive_write(sb, field, ctx)
 	case .Array_Struct, .Dynamic_Struct, .Fixed_Array_Struct:
 		generate_array_struct_write(sb, field, ctx)
+	case .Union:
+		generate_union_field_write(sb, field, indent, ctx)
+	case .Array_Union, .Dynamic_Union, .Fixed_Array_Union:
+		generate_union_array_write(sb, field, indent, ctx)
 	case .Unknown:
 		fmt.sbprintf(sb, "%s// TODO: Unknown type for field %s\n", indent, field.odin_name)
 	}
@@ -1005,4 +1118,194 @@ generate_array_struct_write :: proc(sb: ^strings.Builder, field: Field_Info, ctx
 	fmt.sbprintf(sb, "\t\tmarshal_%s(w, item)\n", elem_lower)
 	fmt.sbprintf(sb, "\t}}\n")
 	fmt.sbprintf(sb, "\t%swrite_array_end(w)\n", oj)
+}
+
+generate_union_field_read :: proc(sb: ^strings.Builder, field: Field_Info, ctx: ^Gen_Context) {
+	oj := ctx.oj
+	union_lower := to_snake_case(field.type_name)
+	fmt.sbprintf(sb, "\t{{\n")
+	fmt.sbprintf(
+		sb,
+		"\t\tnested_elem, nested_err := %sobj_element_from(r, elem, \"%s\")\n",
+		oj,
+		field.json_name,
+	)
+	fmt.sbprintf(sb, "\t\tif nested_err == .OK {{\n")
+	fmt.sbprintf(
+		sb,
+		"\t\t\tresult.%s, err = unmarshal_%s_elem(r, nested_elem)\n",
+		field.odin_name,
+		union_lower,
+	)
+	fmt.sbprintf(sb, "\t\t\tif err != .OK do return\n")
+	fmt.sbprintf(sb, "\t\t}}\n")
+	fmt.sbprintf(sb, "\t}}\n\n")
+}
+
+generate_union_array_read :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	parent: Struct_Info,
+	ctx: ^Gen_Context,
+) {
+	oj := ctx.oj
+	tp := get_type_prefix(parent, ctx)
+	union_lower := to_snake_case(field.element_type)
+	is_fixed := field.type_kind == .Fixed_Array_Union
+	is_dynamic := field.type_kind == .Dynamic_Union
+
+	fmt.sbprintf(sb, "\t{{\n")
+	fmt.sbprintf(
+		sb,
+		"\t\tarr_elem, arr_err := %sobj_element_from(r, elem, \"%s\")\n",
+		oj,
+		field.json_name,
+	)
+	fmt.sbprintf(sb, "\t\tif arr_err == .OK {{\n")
+	fmt.sbprintf(sb, "\t\t\titems, _ := %sarray_elements_from(r, arr_elem)\n", oj)
+
+	if is_fixed {
+		fmt.sbprintf(sb, "\t\t\tcount := min(len(items), %d)\n", field.array_size)
+		fmt.sbprintf(sb, "\t\t\tfor item_elem, i in items[:count] {{\n")
+		fmt.sbprintf(
+			sb,
+			"\t\t\t\tresult.%s[i], err = unmarshal_%s_elem(r, item_elem)\n",
+			field.odin_name,
+			union_lower,
+		)
+	} else if is_dynamic {
+		fmt.sbprintf(
+			sb,
+			"\t\t\tresult.%s = make([dynamic]%s%s, 0, len(items))\n",
+			field.odin_name,
+			tp,
+			field.element_type,
+		)
+		fmt.sbprintf(sb, "\t\t\tfor item_elem in items {{\n")
+		fmt.sbprintf(sb, "\t\t\t\titem, item_err := unmarshal_%s_elem(r, item_elem)\n", union_lower)
+		fmt.sbprintf(sb, "\t\t\t\terr = item_err\n")
+		fmt.sbprintf(sb, "\t\t\t\tif err != .OK do return\n")
+		fmt.sbprintf(sb, "\t\t\t\tappend(&result.%s, item)\n", field.odin_name)
+	} else {
+		fmt.sbprintf(
+			sb,
+			"\t\t\tresult.%s = make([]%s%s, len(items))\n",
+			field.odin_name,
+			tp,
+			field.element_type,
+		)
+		fmt.sbprintf(sb, "\t\t\tfor item_elem, i in items {{\n")
+		fmt.sbprintf(
+			sb,
+			"\t\t\t\tresult.%s[i], err = unmarshal_%s_elem(r, item_elem)\n",
+			field.odin_name,
+			union_lower,
+		)
+	}
+
+	fmt.sbprintf(sb, "\t\t\t\tif err != .OK do return\n")
+	fmt.sbprintf(sb, "\t\t\t}}\n")
+	fmt.sbprintf(sb, "\t\t}}\n")
+	fmt.sbprintf(sb, "\t}}\n\n")
+}
+
+generate_union_field_write :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	indent: string,
+	ctx: ^Gen_Context,
+) {
+	union_lower := to_snake_case(field.type_name)
+	fmt.sbprintf(sb, "%smarshal_%s(w, value.%s)\n", indent, union_lower, field.odin_name)
+}
+
+generate_union_array_write :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	indent: string,
+	ctx: ^Gen_Context,
+) {
+	oj := ctx.oj
+	union_lower := to_snake_case(field.element_type)
+	fmt.sbprintf(sb, "%s%swrite_array_start(w)\n", indent, oj)
+	fmt.sbprintf(sb, "%sfor item in value.%s {{\n", indent, field.odin_name)
+	fmt.sbprintf(sb, "%s\tmarshal_%s(w, item)\n", indent, union_lower)
+	fmt.sbprintf(sb, "%s}}\n", indent)
+	fmt.sbprintf(sb, "%s%swrite_array_end(w)\n", indent, oj)
+}
+
+generate_union_unmarshal :: proc(sb: ^strings.Builder, info: Union_Info, ctx: ^Gen_Context) {
+	lower_name := to_snake_case(info.name)
+	type_prefix := union_type_prefix(info, ctx)
+	type_name := fmt.tprintf("%s%s", type_prefix, info.name)
+	oj := ctx.oj
+
+	fmt.sbprintf(sb, "// Unmarshals JSON into %s (tagged union)\n", info.name)
+	if info.source_package != "" && info.source_file != "" {
+		fmt.sbprintf(sb, "// Source: %s (%s)\n", info.source_package, info.source_file)
+	}
+
+	fmt.sbprintf(
+		sb,
+		"unmarshal_%s :: proc(r: ^%sReader, path: string = \"\") -> (result: %s, err: %sError) {{\n",
+		lower_name,
+		oj,
+		type_name,
+		oj,
+	)
+	fmt.sbprintf(sb, "\telem, elem_err := %selement_at(r, path)\n", oj)
+	fmt.sbprintf(sb, "\tif elem_err != .OK do return result, elem_err\n")
+	fmt.sbprintf(sb, "\treturn unmarshal_%s_elem(r, elem)\n", lower_name)
+	fmt.sbprintf(sb, "}}\n\n")
+
+	fmt.sbprintf(sb, "// Unmarshals JSON element into %s (tagged union)\n", info.name)
+	fmt.sbprintf(
+		sb,
+		"unmarshal_%s_elem :: proc(r: ^%sReader, elem: %sElement) -> (result: %s, err: %sError) {{\n",
+		lower_name,
+		oj,
+		oj,
+		type_name,
+		oj,
+	)
+	fmt.sbprintf(sb, "\tdiscr, _ := %sread_string_elem(r, elem, \"%s\")\n", oj, info.discriminator)
+	fmt.sbprintf(sb, "\tswitch discr {{\n")
+	for v in info.variants {
+		variant_lower := to_snake_case(v.struct_name)
+		fmt.sbprintf(sb, "\tcase \"%s\":\n", v.tag)
+		fmt.sbprintf(sb, "\t\tvariant, v_err := unmarshal_%s_elem(r, elem)\n", variant_lower)
+		fmt.sbprintf(sb, "\t\tresult = variant\n")
+		fmt.sbprintf(sb, "\t\terr = v_err\n")
+	}
+	fmt.sbprintf(sb, "\t}}\n")
+	fmt.sbprintf(sb, "\treturn\n")
+	fmt.sbprintf(sb, "}}\n")
+}
+
+generate_union_marshal :: proc(sb: ^strings.Builder, info: Union_Info, ctx: ^Gen_Context) {
+	lower_name := to_snake_case(info.name)
+	type_prefix := union_type_prefix(info, ctx)
+	type_name := fmt.tprintf("%s%s", type_prefix, info.name)
+	oj := ctx.oj
+
+	fmt.sbprintf(sb, "// Marshals %s (tagged union) to JSON\n", info.name)
+	fmt.sbprintf(sb, "marshal_%s :: proc(w: ^%sWriter, value: %s) {{\n", lower_name, oj, type_name)
+	fmt.sbprintf(sb, "\tswitch variant in value {{\n")
+	for v in info.variants {
+		variant_lower := to_snake_case(v.struct_name)
+		fmt.sbprintf(sb, "\tcase %s%s:\n", type_prefix, v.struct_name)
+		fmt.sbprintf(sb, "\t\tmarshal_%s(w, variant)\n", variant_lower)
+	}
+	fmt.sbprintf(sb, "\t}}\n")
+	fmt.sbprintf(sb, "}}\n")
+}
+
+union_type_prefix :: proc(info: Union_Info, ctx: ^Gen_Context) -> string {
+	if info.source_dir == "" {
+		return ""
+	}
+	if prefix, ok := ctx.pkg_prefixes[info.source_dir]; ok {
+		return prefix
+	}
+	return ""
 }

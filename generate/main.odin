@@ -62,8 +62,11 @@ main :: proc() {
 	all_parsed_structs := make(map[string]Struct_Info, allocator = context.allocator)
 	defer delete(all_parsed_structs)
 
+	all_unions := make([dynamic]Union_Info, allocator = context.allocator)
+	defer delete(all_unions)
+
 	for file in files {
-		structs, pkg_name, parse_ok := parse_file(file)
+		structs, unions, pkg_name, parse_ok := parse_file(file)
 		if !parse_ok {
 			if opts.verbose {
 				fmt.eprintfln("Warning: Could not parse: %s", file)
@@ -79,6 +82,13 @@ main :: proc() {
 			info.source_package = pkg_name
 			info.source_dir = source_dir
 			all_parsed_structs[info.name] = info
+		}
+
+		for &info in unions {
+			info.source_file = file
+			info.source_package = pkg_name
+			info.source_dir = source_dir
+			append(&all_unions, info)
 		}
 	}
 
@@ -121,13 +131,16 @@ main :: proc() {
 		}
 	}
 
-	if len(all_structs) == 0 {
-		fmt.eprintln("No structs with json tags found")
+	resolve_unions(&all_unions, all_structs[:])
+
+	if len(all_structs) == 0 && len(all_unions) == 0 {
+		fmt.eprintln("No structs or unions with json tags found")
 		os.exit(0)
 	}
 
 	if opts.verbose {
 		fmt.printfln("Total structs found: %d", len(all_structs))
+		fmt.printfln("Total unions found: %d", len(all_unions))
 	}
 
 	exe_path := os.args[0]
@@ -144,7 +157,13 @@ main :: proc() {
 		fmt.printfln("Ojson import: %s", ojson_import)
 	}
 
-	code := generate_code(all_structs[:], opts.package_name, abs_output_dir, ojson_import)
+	code := generate_code(
+		all_structs[:],
+		all_unions[:],
+		opts.package_name,
+		abs_output_dir,
+		ojson_import,
+	)
 
 	if output_dir != "" && output_dir != "." {
 		os.make_directory(output_dir)

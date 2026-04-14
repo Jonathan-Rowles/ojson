@@ -45,14 +45,16 @@ parse_file :: proc(
 	allocator := context.allocator,
 ) -> (
 	structs: [dynamic]Struct_Info,
+	unions: [dynamic]Union_Info,
 	pkg_name: string,
 	ok: bool,
 ) {
 	structs = make([dynamic]Struct_Info, allocator)
+	unions = make([dynamic]Union_Info, allocator)
 
 	data, read_err := os.read_entire_file(file_path, allocator)
 	if read_err != nil {
-		return structs, "", false
+		return structs, unions, "", false
 	}
 
 	NO_POS :: tokenizer.Pos{}
@@ -65,7 +67,7 @@ parse_file :: proc(
 	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
 
 	if !parser.parse_file(&p, file) {
-		return structs, "", false
+		return structs, unions, "", false
 	}
 
 	pkg_name = file.pkg_name != "" ? strings.clone(file.pkg_name, allocator) : ""
@@ -75,16 +77,17 @@ parse_file :: proc(
 	for decl in file.decls {
 		#partial switch d in decl.derived {
 		case ^ast.Value_Decl:
-			process_value_decl(d, &structs, allocator)
+			process_value_decl(d, &structs, &unions, allocator)
 		}
 	}
 
-	return structs, pkg_name, true
+	return structs, unions, pkg_name, true
 }
 
 process_value_decl :: proc(
 	decl: ^ast.Value_Decl,
 	structs: ^[dynamic]Struct_Info,
+	unions: ^[dynamic]Union_Info,
 	allocator := context.allocator,
 ) {
 	if len(decl.names) == 0 || len(decl.values) == 0 {
@@ -101,8 +104,126 @@ process_value_decl :: proc(
 			if struct_info != nil && len(struct_info.fields) > 0 && !struct_info.is_tuple {
 				append(structs, struct_info^)
 			}
+		case ^ast.Union_Type:
+			union_info := extract_union_info(n.name, v, allocator)
+			if union_info != nil && len(union_info.variants) > 0 {
+				append(unions, union_info^)
+			}
 		}
 	}
+}
+
+extract_union_info :: proc(
+	name: string,
+	union_type: ^ast.Union_Type,
+	allocator := context.allocator,
+) -> ^Union_Info {
+	info := new(Union_Info, allocator)
+	info.name = strings.clone(name, allocator)
+	info.variants = make([dynamic]Union_Variant, allocator)
+
+	if union_type.variants == nil {
+		return info
+	}
+
+	for variant in union_type.variants {
+		variant_name := expr_to_string(variant, allocator)
+		if variant_name == "" {
+			continue
+		}
+		append(&info.variants, Union_Variant{struct_name = variant_name})
+	}
+
+	return info
+}
+
+resolve_unions :: proc(
+	unions: ^[dynamic]Union_Info,
+	structs: []Struct_Info,
+	allocator := context.allocator,
+) {
+	structs_by_name := make(map[string]^Struct_Info, allocator = allocator)
+	defer delete(structs_by_name)
+	for &s in structs {
+		structs_by_name[s.name] = &s
+	}
+
+	resolved: [dynamic]Union_Info
+	resolved = make([dynamic]Union_Info, allocator)
+
+	for &u in unions {
+		discriminator := ""
+		all_resolved := true
+
+		for &v in u.variants {
+			variant_struct, found := structs_by_name[v.struct_name]
+			if !found {
+				all_resolved = false
+				break
+			}
+
+			tag_field_idx := -1
+			for f, i in variant_struct.fields {
+				if f.union_tag != "" {
+					tag_field_idx = i
+					break
+				}
+			}
+			if tag_field_idx < 0 {
+				all_resolved = false
+				break
+			}
+
+			marker := variant_struct.fields[tag_field_idx]
+			if discriminator == "" {
+				discriminator = marker.json_name
+			} else if discriminator != marker.json_name {
+				all_resolved = false
+				break
+			}
+			v.tag = marker.union_tag
+		}
+
+		if all_resolved && discriminator != "" {
+			u.discriminator = discriminator
+			append(&resolved, u)
+		}
+	}
+
+	union_names := make(map[string]bool, allocator = allocator)
+	defer delete(union_names)
+	for u in resolved {
+		union_names[u.name] = true
+	}
+
+	for &s in structs {
+		for &f in s.fields {
+			#partial switch f.type_kind {
+			case .Struct:
+				if f.type_name in union_names {
+					f.type_kind = .Union
+				}
+			case .Array_Struct:
+				if f.element_type in union_names {
+					f.type_kind = .Array_Union
+				}
+			case .Dynamic_Struct:
+				if f.element_type in union_names {
+					f.type_kind = .Dynamic_Union
+				}
+			case .Fixed_Array_Struct:
+				if f.element_type in union_names {
+					f.type_kind = .Fixed_Array_Union
+				}
+			}
+		}
+	}
+
+	clear(unions)
+	for u in resolved {
+		append(unions, u)
+	}
+	delete(resolved)
 }
 
 extract_struct_info :: proc(
@@ -137,7 +258,7 @@ process_field :: proc(
 	has_any_json_tag: ^bool,
 	allocator := context.allocator,
 ) {
-	json_name, omitempty, has_tag := parse_json_tag(field.tag)
+	json_name, omitempty, raw, union_tag, has_tag := parse_json_tag(field.tag, allocator)
 	if has_tag {
 		has_any_json_tag^ = true
 		if json_name == "-" {
@@ -152,6 +273,8 @@ process_field :: proc(
 			field_info.odin_name = strings.clone(n.name, allocator)
 			field_info.json_name = has_tag ? json_name : strings.clone(n.name, allocator)
 			field_info.omitempty = omitempty
+			field_info.raw = raw
+			field_info.union_tag = union_tag
 			field_info.type_kind, field_info.type_name, field_info.element_type, field_info.array_size =
 				determine_type_kind(field.type, allocator)
 
@@ -160,10 +283,19 @@ process_field :: proc(
 	}
 }
 
-parse_json_tag :: proc(tag: tokenizer.Token) -> (json_name: string, omitempty: bool, ok: bool) {
+parse_json_tag :: proc(
+	tag: tokenizer.Token,
+	allocator := context.allocator,
+) -> (
+	json_name: string,
+	omitempty: bool,
+	raw: bool,
+	union_tag: string,
+	ok: bool,
+) {
 	text := tag.text
 	if text == "" {
-		return "", false, false
+		return "", false, false, "", false
 	}
 
 	if len(text) >= 2 && text[0] == '`' && text[len(text) - 1] == '`' {
@@ -173,14 +305,14 @@ parse_json_tag :: proc(tag: tokenizer.Token) -> (json_name: string, omitempty: b
 	json_prefix := `json:"`
 	idx := strings.index(text, json_prefix)
 	if idx < 0 {
-		return "", false, false
+		return "", false, false, "", false
 	}
 
 	remaining := text[idx + len(json_prefix):]
 
 	end_idx := strings.index_byte(remaining, '"')
 	if end_idx < 0 {
-		return "", false, false
+		return "", false, false, "", false
 	}
 
 	value := remaining[:end_idx]
@@ -189,10 +321,52 @@ parse_json_tag :: proc(tag: tokenizer.Token) -> (json_name: string, omitempty: b
 	if comma_idx >= 0 {
 		options := value[comma_idx + 1:]
 		value = value[:comma_idx]
-		omitempty = strings.contains(options, "omitempty")
+		omitempty = has_option(options, "omitempty")
+		raw = has_option(options, "raw")
+		union_tag = extract_tag_option(options, allocator)
 	}
 
-	return value, omitempty, len(value) > 0
+	return value, omitempty, raw, union_tag, len(value) > 0
+}
+
+has_option :: proc(options: string, name: string) -> bool {
+	remaining := options
+	for len(remaining) > 0 {
+		comma := strings.index_byte(remaining, ',')
+		segment: string
+		if comma < 0 {
+			segment = remaining
+			remaining = ""
+		} else {
+			segment = remaining[:comma]
+			remaining = remaining[comma + 1:]
+		}
+		if strings.trim_space(segment) == name {
+			return true
+		}
+	}
+	return false
+}
+
+extract_tag_option :: proc(options: string, allocator := context.allocator) -> string {
+	prefix := "tag="
+	remaining := options
+	for len(remaining) > 0 {
+		comma := strings.index_byte(remaining, ',')
+		segment: string
+		if comma < 0 {
+			segment = remaining
+			remaining = ""
+		} else {
+			segment = remaining[:comma]
+			remaining = remaining[comma + 1:]
+		}
+		segment = strings.trim_space(segment)
+		if strings.has_prefix(segment, prefix) {
+			return strings.clone(segment[len(prefix):], allocator)
+		}
+	}
+	return ""
 }
 
 determine_type_kind :: proc(
