@@ -27,44 +27,62 @@ generate_code :: proc(
 		source_dir:  string,
 		import_path: string,
 	}
+
 	packages := make(map[string]Package_Info, allocator = allocator)
+	package_order := make([dynamic]string, allocator)
 	defer delete(packages)
+	defer delete(package_order)
+
+	record_package :: proc(
+		packages: ^map[string]Package_Info,
+		order: ^[dynamic]string,
+		pkg_name_filter: string,
+		source_package: string,
+		source_dir: string,
+		output_dir: string,
+	) {
+		if source_package == "" || source_dir == "" {
+			return
+		}
+		if source_package == pkg_name_filter {
+			return
+		}
+		if source_dir in packages {
+			return
+		}
+		import_path, _ := fp.rel(output_dir, source_dir)
+		packages[source_dir] = Package_Info {
+			name        = source_package,
+			source_dir  = source_dir,
+			import_path = import_path,
+		}
+		append(order, source_dir)
+	}
 
 	for info in structs {
-		if info.source_package == "" || info.source_dir == "" {
-			continue
-		}
-		if info.source_package == package_name {
-			continue
-		}
-		if info.source_dir not_in packages {
-			import_path, _ := fp.rel(output_dir, info.source_dir)
-			packages[info.source_dir] = Package_Info {
-				name        = info.source_package,
-				source_dir  = info.source_dir,
-				import_path = import_path,
-			}
-		}
+		record_package(
+			&packages,
+			&package_order,
+			package_name,
+			info.source_package,
+			info.source_dir,
+			output_dir,
+		)
 	}
 	for info in unions {
-		if info.source_package == "" || info.source_dir == "" {
-			continue
-		}
-		if info.source_package == package_name {
-			continue
-		}
-		if info.source_dir not_in packages {
-			import_path, _ := fp.rel(output_dir, info.source_dir)
-			packages[info.source_dir] = Package_Info {
-				name        = info.source_package,
-				source_dir  = info.source_dir,
-				import_path = import_path,
-			}
-		}
+		record_package(
+			&packages,
+			&package_order,
+			package_name,
+			info.source_package,
+			info.source_dir,
+			output_dir,
+		)
 	}
 
 	ctx.pkg_prefixes = make(map[string]string, allocator = allocator)
-	for dir, pkg in packages {
+	for dir in package_order {
+		pkg := packages[dir]
 		ctx.pkg_prefixes[dir] = fmt.tprintf("%s.", pkg.name)
 	}
 
@@ -73,7 +91,8 @@ generate_code :: proc(
 	strings.write_string(&sb, package_name)
 	strings.write_string(&sb, "\n\n")
 
-	for _, pkg in packages {
+	for dir in package_order {
+		pkg := packages[dir]
 		fmt.sbprintf(&sb, "import %s \"%s\"\n", pkg.name, pkg.import_path)
 	}
 	if ojson_import != "" {

@@ -82,6 +82,17 @@ main :: proc() {
 			info.source_package = pkg_name
 			info.source_dir = source_dir
 			all_parsed_structs[info.name] = info
+			if !info.is_tuple && len(info.fields) > 0 {
+				if opts.verbose {
+					fmt.printfln(
+						"  Found struct: %s (%d fields) in package %s",
+						info.name,
+						len(info.fields),
+						info.source_package,
+					)
+				}
+				append(&all_structs, info)
+			}
 		}
 
 		for &info in unions {
@@ -89,20 +100,6 @@ main :: proc() {
 			info.source_package = pkg_name
 			info.source_dir = source_dir
 			append(&all_unions, info)
-		}
-	}
-
-	for _, info in all_parsed_structs {
-		if !info.is_tuple && len(info.fields) > 0 {
-			if opts.verbose {
-				fmt.printfln(
-					"  Found struct: %s (%d fields) in package %s",
-					info.name,
-					len(info.fields),
-					info.source_package,
-				)
-			}
-			append(&all_structs, info)
 		}
 	}
 
