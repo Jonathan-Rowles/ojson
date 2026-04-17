@@ -107,6 +107,18 @@ read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool
 	return oj.read_bool_elem(r, elem, field)
 }
 
+element_value_type :: proc(r: ^Reader, elem: Element) -> Value_Type {
+	return oj.element_value_type(r, elem)
+}
+
+object_keys :: proc(r: ^Reader, elem: Element) -> []string {
+	return oj.object_keys(r, elem)
+}
+
+read_string_value :: proc(r: ^Reader, elem: Element) -> (value: string, err: Error) {
+	return oj.read_string_value(r, elem)
+}
+
 read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
 	return oj.read_raw(r, path)
 }

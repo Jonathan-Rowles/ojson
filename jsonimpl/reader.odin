@@ -862,6 +862,35 @@ scan_string_end :: proc(input: string, start: int) -> int {
 	return -1
 }
 
+element_value_type :: proc(r: ^Reader, elem: Element) -> Value_Type {
+	return r.parser.values[u32(elem)].type
+}
+
+object_keys :: proc(r: ^Reader, elem: Element) -> []string {
+	val := r.parser.values[u32(elem)]
+	if val.type != .Object {
+		return nil
+	}
+	count := 0
+	for &kv in r.parser.kv_buffer[:r.parser.kv_len] {
+		if kv.owner_idx == u32(elem) {
+			count += 1
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	result := make([]string, count, mem.arena_allocator(&r.arena))
+	i := 0
+	for &kv in r.parser.kv_buffer[:r.parser.kv_len] {
+		if kv.owner_idx == u32(elem) {
+			result[i] = kv.key
+			i += 1
+		}
+	}
+	return result
+}
+
 get_by_path_from :: proc(p: ^Parser_State, start_idx: u32, path: string) -> (Lazy_Value, bool) {
 	idx, found := get_idx_by_path_from(p, start_idx, path)
 	if !found {
