@@ -1,5 +1,7 @@
 # ojson
 
+[![CI](https://github.com/Jonathan-Rowles/ojson/actions/workflows/ci.yml/badge.svg)](https://github.com/Jonathan-Rowles/ojson/actions/workflows/ci.yml)
+
 **SIMD-accelerated, lazy JSON field extraction for the [Odin programming language](https://odin-lang.org/).**
 
 ojson parses JSON lazily: it walks the full document to index structure and positions, but defers type conversion and string unescaping until you read a field. SIMD-accelerated string and number scanning. Includes a code generator for type-safe unmarshalling and marshalling.
