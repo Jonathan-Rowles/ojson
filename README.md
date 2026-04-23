@@ -102,4 +102,3 @@ The following types are not currently supported by the code generator:
 
 - **Pointers (`^T`)**: detected by the parser but generated code won't compile
 - **Maps (`map[K]V`)**
-- **Unions**
