@@ -166,6 +166,11 @@ writer_string :: proc(w: ^Writer) -> string {
 }
 
 @(private)
+hex_digit_lower :: proc(nibble: int) -> byte {
+	return nibble < 10 ? byte('0' + nibble) : byte('a' + nibble - 10)
+}
+
+@(private)
 write_escaped :: proc(w: ^Writer, s: string) {
 	for ch in s {
 		switch ch {
@@ -179,9 +184,15 @@ write_escaped :: proc(w: ^Writer, s: string) {
 			bytes.buffer_write_string(&w.buffer, `\r`)
 		case '\t':
 			bytes.buffer_write_string(&w.buffer, `\t`)
+		case '\b':
+			bytes.buffer_write_string(&w.buffer, `\b`)
+		case '\f':
+			bytes.buffer_write_string(&w.buffer, `\f`)
 		case:
 			if ch < 0x20 {
-				// skip control chars
+				bytes.buffer_write_string(&w.buffer, `\u00`)
+				bytes.buffer_write_byte(&w.buffer, hex_digit_lower((int(ch) >> 4) & 0xf))
+				bytes.buffer_write_byte(&w.buffer, hex_digit_lower(int(ch) & 0xf))
 			} else {
 				encoded, width := utf8.encode_rune(ch)
 				bytes.buffer_write(&w.buffer, encoded[:width])

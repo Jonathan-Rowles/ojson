@@ -427,6 +427,45 @@ test_writer_basic :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_writer_escapes_control_characters :: proc(t: ^testing.T) {
+	w := init_writer()
+	defer destroy_writer(&w)
+
+	write_string(&w, "a\x00b\x01c\x1fd")
+	testing.expect_value(t, writer_string(&w), `"a\u0000b\u0001c\u001fd"`)
+}
+
+@(test)
+test_writer_escapes_mixed_control_and_utf8 :: proc(t: ^testing.T) {
+	w := init_writer()
+	defer destroy_writer(&w)
+
+	write_string(&w, "tab\there\x0bverté世\x1a")
+	testing.expect_value(t, writer_string(&w), `"tab\there\u000bverté世\u001a"`)
+}
+
+@(test)
+test_writer_short_escapes :: proc(t: ^testing.T) {
+	w := init_writer()
+	defer destroy_writer(&w)
+
+	write_string(&w, "\"\\\b\f\n\r\t")
+	testing.expect_value(t, writer_string(&w), `"\"\\\b\f\n\r\t"`)
+}
+
+@(test)
+test_writer_key_escapes_control_characters :: proc(t: ^testing.T) {
+	w := init_writer()
+	defer destroy_writer(&w)
+
+	write_object_start(&w)
+	write_key(&w, "k\x02")
+	write_string(&w, "v\x1f")
+	write_object_end(&w)
+	testing.expect_value(t, writer_string(&w), `{"k\u0002":"v\u001f"}`)
+}
+
+@(test)
 test_writer_reuse :: proc(t: ^testing.T) {
 	w := init_writer()
 	defer destroy_writer(&w)
