@@ -1,4 +1,4 @@
-.PHONY: test clean generate build-generator
+.PHONY: test clean generate build-generator bench
 
 DEV_FLAGS := -vet -strict-style -debug
 
@@ -15,7 +15,11 @@ ifndef SRC
 	$(error SRC is required. Usage: make generate SRC=../myproject/types)
 endif
 	@mkdir -p gen
-	@./bin/generate -r $(SRC) 
+	@./bin/generate -r $(SRC)
+
+bench:
+	@mkdir -p bin
+	@cd benchmark && odin run . -out:../bin/bench -o:speed -microarch:native
 
 clean:
 	@rm -rf bin/

@@ -11,6 +11,7 @@ parser_parse :: proc(p: ^Parser_State, input: string) -> Error {
 	p.depth = 0
 	p.values_len = 0
 	p.kv_len = 0
+	p.kv_stack_len = 0
 	p.arr_len = 0
 
 	root_idx, err := parse_value(p)
@@ -74,26 +75,29 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 	}
 
 	obj_idx := p.values_len
-	assert(obj_idx < u32(len(p.values)), "values buffer overflow")
+	if obj_idx >= u32(len(p.values)) {
+		grow_slice(p, &p.values, obj_idx, obj_idx + 1)
+	}
 	p.values_len += 1
+
+	stack_base := p.kv_stack_len
 
 	if p.input[p.pos] == '}' {
 		p.pos += 1
 		p.values[obj_idx] = Lazy_Value {
 			type = .Object,
 			input_pos = start_pos,
-			data = {container = 0},
+			data = {container = {0, p.kv_len, p.kv_len}},
 		}
 		return obj_idx, .OK
 	}
-
-	kv_count: u32 = 0
 
 	for {
 		if p.pos >= len(p.input) || p.input[p.pos] != '"' {
 			return 0, .Invalid_JSON
 		}
 
+		key_off := u32(p.pos + 1)
 		key, key_err := parse_raw_key(p)
 		if key_err != .OK {
 			return 0, key_err
@@ -110,14 +114,13 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 			return 0, val_err
 		}
 
-		assert(p.kv_len < u32(len(p.kv_buffer)), "kv_buffer overflow")
-		p.kv_buffer[p.kv_len] = KV {
-			owner_idx = obj_idx,
-			key       = key,
-			value_idx = value_idx,
+		if p.kv_stack_len >= u32(len(p.kv_stack_keys)) {
+			grow_slice(p, &p.kv_stack_keys, p.kv_stack_len, p.kv_stack_len + 1)
+			grow_slice(p, &p.kv_stack_vals, p.kv_stack_len, p.kv_stack_len + 1)
 		}
-		p.kv_len += 1
-		kv_count += 1
+		p.kv_stack_keys[p.kv_stack_len] = u64(key_off) << 32 | u64(len(key))
+		p.kv_stack_vals[p.kv_stack_len] = value_idx
+		p.kv_stack_len += 1
 
 		skip_ws(p)
 		if p.pos >= len(p.input) {
@@ -135,10 +138,21 @@ parse_object :: proc(p: ^Parser_State) -> (u32, Error) {
 		skip_ws(p)
 	}
 
+	kv_count := p.kv_stack_len - stack_base
+	members_begin := p.kv_len
+	if members_begin + kv_count > u32(len(p.kv_keys)) {
+		grow_slice(p, &p.kv_keys, p.kv_len, members_begin + kv_count)
+		grow_slice(p, &p.kv_vals, p.kv_len, members_begin + kv_count)
+	}
+	copy(p.kv_keys[members_begin:], p.kv_stack_keys[stack_base:p.kv_stack_len])
+	copy(p.kv_vals[members_begin:], p.kv_stack_vals[stack_base:p.kv_stack_len])
+	p.kv_len += kv_count
+	p.kv_stack_len = stack_base
+
 	p.values[obj_idx] = Lazy_Value {
 		type = .Object,
 		input_pos = start_pos,
-		data = {container = kv_count},
+		data = {container = {kv_count, members_begin, p.kv_len}},
 	}
 	return obj_idx, .OK
 }
@@ -153,15 +167,19 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 	}
 
 	arr_idx := p.values_len
-	assert(arr_idx < u32(len(p.values)), "values buffer overflow")
+	if arr_idx >= u32(len(p.values)) {
+		grow_slice(p, &p.values, arr_idx, arr_idx + 1)
+	}
 	p.values_len += 1
+
+	entries_begin := p.arr_len
 
 	if p.input[p.pos] == ']' {
 		p.pos += 1
 		p.values[arr_idx] = Lazy_Value {
 			type = .Array,
 			input_pos = start_pos,
-			data = {container = 0},
+			data = {container = {0, entries_begin, entries_begin}},
 		}
 		return arr_idx, .OK
 	}
@@ -174,7 +192,9 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 			return 0, err
 		}
 
-		assert(p.arr_len < u32(len(p.arr_buffer)), "arr_buffer overflow")
+		if p.arr_len >= u32(len(p.arr_buffer)) {
+			grow_slice(p, &p.arr_buffer, p.arr_len, p.arr_len + 1)
+		}
 		p.arr_buffer[p.arr_len] = ArrEntry {
 			owner_idx = arr_idx,
 			value_idx = value_idx,
@@ -200,7 +220,7 @@ parse_array :: proc(p: ^Parser_State) -> (u32, Error) {
 	p.values[arr_idx] = Lazy_Value {
 		type = .Array,
 		input_pos = start_pos,
-		data = {container = child_count},
+		data = {container = {child_count, entries_begin, p.arr_len}},
 	}
 	return arr_idx, .OK
 }
@@ -424,7 +444,9 @@ parse_null :: proc(p: ^Parser_State) -> (u32, Error) {
 
 add_value :: #force_inline proc(p: ^Parser_State, v: Lazy_Value) -> u32 {
 	idx := p.values_len
-	assert(idx < u32(len(p.values)), "values buffer overflow")
+	if idx >= u32(len(p.values)) {
+		grow_slice(p, &p.values, idx, idx + 1)
+	}
 	p.values[idx] = v
 	p.values_len += 1
 	return idx
@@ -496,6 +518,17 @@ float64_pow10 := [17]f64 {
 	1e16,
 }
 
+all_eight_digits :: #force_inline proc(chunk: u64) -> bool {
+	return (chunk & 0xF0F0F0F0F0F0F0F0) == 0x3030303030303030 &&
+		((chunk + 0x0606060606060606) & 0xF0F0F0F0F0F0F0F0) == 0x3030303030303030
+}
+
+parse_eight_digits :: #force_inline proc(chunk: u64) -> u64 {
+	v := (chunk & 0x0F0F0F0F0F0F0F0F) * 2561 >> 8
+	v = (v & 0x00FF00FF00FF00FF) * 6553601 >> 16
+	return (v & 0x0000FFFF0000FFFF) * 42949672960001 >> 32
+}
+
 parse_i64_fast :: proc(s: string) -> (i64, bool) {
 	if len(s) == 0 {
 		return 0, false
@@ -517,6 +550,14 @@ parse_i64_fast :: proc(s: string) -> (i64, bool) {
 
 	d: i64 = 0
 	j := i
+	for i + 8 <= 18 && i + 8 <= uint(len(s)) {
+		chunk := intrinsics.unaligned_load((^u64)(rawptr(uintptr(raw_data(s)) + uintptr(i))))
+		if !all_eight_digits(chunk) {
+			break
+		}
+		d = d * 100000000 + i64(parse_eight_digits(chunk))
+		i += 8
+	}
 	for i < uint(len(s)) {
 		c := s[i]
 		if c >= '0' && c <= '9' {

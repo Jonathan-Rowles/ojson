@@ -10,6 +10,8 @@ Reader :: oj.Reader
 Writer :: oj.Writer
 Value_Type :: oj.Value_Type
 Element :: oj.Element
+Array_Iterator :: oj.Array_Iterator
+Object_Iterator :: oj.Object_Iterator
 
 init_reader :: proc(r: ^Reader, size := DEFAULT_READER_SIZE, allocator := context.allocator) {
 	oj.init_reader(r, size, allocator)
@@ -19,112 +21,247 @@ parse :: proc(r: ^Reader, data: []byte) -> Error {
 	return oj.parse(r, data)
 }
 
-read_string :: proc(r: ^Reader, key: string) -> (value: string, err: Error) {
-	return oj.read_string(r, key)
+// Reading by path from the document root.
+
+@(require_results)
+read_string_path :: proc(r: ^Reader, path: string) -> (value: string, err: Error) {
+	return oj.read_string(r, path)
 }
 
-read_int :: proc(r: ^Reader, key: string) -> (value: int, err: Error) {
-	return oj.read_int(r, key)
+@(require_results)
+read_int_path :: proc(r: ^Reader, path: string) -> (value: int, err: Error) {
+	return oj.read_int(r, path)
 }
 
-read_i64 :: proc(r: ^Reader, key: string) -> (value: i64, err: Error) {
-	return oj.read_i64(r, key)
+@(require_results)
+read_i64_path :: proc(r: ^Reader, path: string) -> (value: i64, err: Error) {
+	return oj.read_i64(r, path)
 }
 
-read_f64 :: proc(r: ^Reader, key: string) -> (value: f64, err: Error) {
-	return oj.read_f64(r, key)
+@(require_results)
+read_f64_path :: proc(r: ^Reader, path: string) -> (value: f64, err: Error) {
+	return oj.read_f64(r, path)
 }
 
-read_bool :: proc(r: ^Reader, key: string) -> (value: bool, err: Error) {
-	return oj.read_bool(r, key)
+@(require_results)
+read_bool_path :: proc(r: ^Reader, path: string) -> (value: bool, err: Error) {
+	return oj.read_bool(r, path)
 }
 
-exists :: proc(r: ^Reader, key: string) -> bool {
-	return oj.exists(r, key)
+@(require_results)
+read_raw_path :: proc(r: ^Reader, path: string) -> (value: string, err: Error) {
+	return oj.read_raw(r, path)
 }
 
-is_null :: proc(r: ^Reader, key: string) -> bool {
-	return oj.is_null(r, key)
-}
+// Reading a named field of an element.
 
-array_len :: proc(r: ^Reader, key: string) -> (int, Error) {
-	return oj.array_len(r, key)
-}
-
-root_element :: proc(r: ^Reader) -> Element {
-	return oj.root_element(r)
-}
-
-element_at :: proc(r: ^Reader, path: string) -> (Element, Error) {
-	return oj.element_at(r, path)
-}
-
-array_elements :: proc(r: ^Reader, path: string) -> ([]Element, Error) {
-	return oj.array_elements(r, path)
-}
-
-array_element :: proc(r: ^Reader, path: string, index: int) -> (Element, Error) {
-	return oj.array_element(r, path, index)
-}
-
-obj_element :: proc(r: ^Reader, path: string, key: string) -> (Element, Error) {
-	return oj.obj_element(r, path, key)
-}
-
-obj_element_from :: proc(r: ^Reader, elem: Element, key: string) -> (Element, Error) {
-	return oj.obj_element_from(r, elem, key)
-}
-
-array_element_from :: proc(r: ^Reader, elem: Element, index: int) -> (Element, Error) {
-	return oj.array_element_from(r, elem, index)
-}
-
-array_elements_from :: proc(r: ^Reader, elem: Element) -> ([]Element, Error) {
-	return oj.array_elements_from(r, elem)
-}
-
+@(require_results)
 read_string_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: string, err: Error) {
 	return oj.read_string_elem(r, elem, field)
 }
 
+@(require_results)
 read_int_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: int, err: Error) {
 	return oj.read_int_elem(r, elem, field)
 }
 
+@(require_results)
 read_i64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: i64, err: Error) {
 	return oj.read_i64_elem(r, elem, field)
 }
 
+@(require_results)
 read_f64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: f64, err: Error) {
 	return oj.read_f64_elem(r, elem, field)
 }
 
-read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
-	return oj.read_f64_value(r, elem)
-}
-
+@(require_results)
 read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool, err: Error) {
 	return oj.read_bool_elem(r, elem, field)
 }
 
-element_value_type :: proc(r: ^Reader, elem: Element) -> Value_Type {
-	return oj.element_value_type(r, elem)
+@(require_results)
+read_raw_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: string, err: Error) {
+	return oj.read_raw_elem(r, elem, field)
 }
 
-object_keys :: proc(r: ^Reader, elem: Element) -> []string {
-	return oj.object_keys(r, elem)
-}
+// Reading the value an element itself holds.
 
+@(require_results)
 read_string_value :: proc(r: ^Reader, elem: Element) -> (value: string, err: Error) {
 	return oj.read_string_value(r, elem)
 }
 
-read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
-	return oj.read_raw(r, path)
+@(require_results)
+read_int_value :: proc(r: ^Reader, elem: Element) -> (value: int, err: Error) {
+	return oj.read_int_value(r, elem)
 }
 
-read_raw_elem :: proc(r: ^Reader, elem: Element, field: string) -> (string, Error) {
-	return oj.read_raw_elem(r, elem, field)
+@(require_results)
+read_i64_value :: proc(r: ^Reader, elem: Element) -> (value: i64, err: Error) {
+	return oj.read_i64_value(r, elem)
+}
+
+@(require_results)
+read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
+	return oj.read_f64_value(r, elem)
+}
+
+@(require_results)
+read_bool_value :: proc(r: ^Reader, elem: Element) -> (value: bool, err: Error) {
+	return oj.read_bool_value(r, elem)
+}
+
+// One name per type, resolved by argument shape:
+//   read_f64(r, "a.b")          value at a path
+//   read_f64(r, elem, "field")  named field of an element
+//   read_f64(r, elem)           the element's own value
+read_string :: proc {
+	read_string_path,
+	read_string_elem,
+	read_string_value,
+}
+
+read_int :: proc {
+	read_int_path,
+	read_int_elem,
+	read_int_value,
+}
+
+read_i64 :: proc {
+	read_i64_path,
+	read_i64_elem,
+	read_i64_value,
+}
+
+read_f64 :: proc {
+	read_f64_path,
+	read_f64_elem,
+	read_f64_value,
+}
+
+read_bool :: proc {
+	read_bool_path,
+	read_bool_elem,
+	read_bool_value,
+}
+
+read_raw :: proc {
+	read_raw_path,
+	read_raw_elem,
+}
+
+@(require_results)
+exists :: proc(r: ^Reader, path: string) -> bool {
+	return oj.exists(r, path)
+}
+
+@(require_results)
+is_null :: proc(r: ^Reader, path: string) -> bool {
+	return oj.is_null(r, path)
+}
+
+@(require_results)
+array_len :: proc(r: ^Reader, path: string) -> (int, Error) {
+	return oj.array_len(r, path)
+}
+
+// Navigating to elements.
+
+@(require_results)
+root_element :: proc(r: ^Reader) -> Element {
+	return oj.root_element(r)
+}
+
+@(require_results)
+element_at :: proc(r: ^Reader, path: string) -> (Element, Error) {
+	return oj.element_at(r, path)
+}
+
+@(require_results)
+element_value_type :: proc(r: ^Reader, elem: Element) -> Value_Type {
+	return oj.element_value_type(r, elem)
+}
+
+@(require_results)
+array_element :: proc(r: ^Reader, path: string, index: int) -> (Element, Error) {
+	return oj.array_element(r, path, index)
+}
+
+@(require_results)
+array_element_from :: proc(r: ^Reader, elem: Element, index: int) -> (Element, Error) {
+	return oj.array_element_from(r, elem, index)
+}
+
+@(require_results)
+obj_element :: proc(r: ^Reader, path: string, key: string) -> (Element, Error) {
+	return oj.obj_element(r, path, key)
+}
+
+@(require_results)
+obj_element_from :: proc(r: ^Reader, elem: Element, key: string) -> (Element, Error) {
+	return oj.obj_element_from(r, elem, key)
+}
+
+// Allocating collectors. These build a slice in the reader arena; prefer the
+// iterators below when you are only walking the container once.
+
+@(require_results)
+array_elements :: proc(r: ^Reader, path: string) -> ([]Element, Error) {
+	return oj.array_elements(r, path)
+}
+
+@(require_results)
+array_elements_from :: proc(r: ^Reader, elem: Element) -> ([]Element, Error) {
+	return oj.array_elements_from(r, elem)
+}
+
+@(require_results)
+object_keys :: proc(r: ^Reader, elem: Element) -> []string {
+	return oj.object_keys(r, elem)
+}
+
+// Non-allocating iteration.
+//
+//	it := ojson.array_iter(&r, elem)
+//	for item in ojson.next(&it) { ... }
+//
+//	oit := ojson.object_iter(&r, elem)
+//	for key, value in ojson.next(&oit) { ... }
+
+@(require_results)
+array_iter :: proc(r: ^Reader, elem: Element) -> Array_Iterator {
+	return oj.array_iter(r, elem)
+}
+
+@(require_results)
+array_iter_at :: proc(r: ^Reader, path: string) -> (Array_Iterator, Error) {
+	return oj.array_iter_at(r, path)
+}
+
+@(require_results)
+object_iter :: proc(r: ^Reader, elem: Element) -> Object_Iterator {
+	return oj.object_iter(r, elem)
+}
+
+@(require_results)
+object_iter_at :: proc(r: ^Reader, path: string) -> (Object_Iterator, Error) {
+	return oj.object_iter_at(r, path)
+}
+
+@(require_results)
+next_element :: proc(it: ^Array_Iterator) -> (elem: Element, ok: bool) {
+	return oj.next_element(it)
+}
+
+@(require_results)
+next_pair :: proc(it: ^Object_Iterator) -> (key: string, value: Element, ok: bool) {
+	return oj.next_pair(it)
+}
+
+next :: proc {
+	next_element,
+	next_pair,
 }
 
 init_writer :: proc(
@@ -202,6 +339,7 @@ writer_reset :: proc(w: ^Writer) {
 	oj.writer_reset(w)
 }
 
+@(require_results)
 writer_string :: proc(w: ^Writer) -> string {
 	return oj.writer_string(w)
 }
@@ -212,6 +350,8 @@ destroy :: proc {
 }
 
 // One-shot convenience functions
+
+@(require_results)
 get_string :: proc(
 	data: []byte,
 	key: string,
@@ -223,6 +363,7 @@ get_string :: proc(
 	return oj.get_string(data, key, allocator)
 }
 
+@(require_results)
 get_int :: proc(
 	data: []byte,
 	key: string,
@@ -234,6 +375,7 @@ get_int :: proc(
 	return oj.get_int(data, key, allocator)
 }
 
+@(require_results)
 get_i64 :: proc(
 	data: []byte,
 	key: string,
@@ -245,6 +387,7 @@ get_i64 :: proc(
 	return oj.get_i64(data, key, allocator)
 }
 
+@(require_results)
 get_f64 :: proc(
 	data: []byte,
 	key: string,
@@ -256,6 +399,7 @@ get_f64 :: proc(
 	return oj.get_f64(data, key, allocator)
 }
 
+@(require_results)
 get_bool :: proc(
 	data: []byte,
 	key: string,

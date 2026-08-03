@@ -915,3 +915,93 @@ test_simd_string_escape_boundaries :: proc(t: ^testing.T) {
 		testing.expectf(t, err == .OK, "failed with escape at pos %d: %v", pos, err)
 	}
 }
+
+@(test)
+test_dense_array_buffer_growth :: proc(t: ^testing.T) {
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+	strings.write_byte(&b, '[')
+	for i in 0 ..< 50_000 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_int(&b, i & 9)
+	}
+	strings.write_byte(&b, ']')
+
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	err := parse(&r, transmute([]byte)strings.to_string(b))
+	testing.expect_value(t, err, Error.OK)
+
+	n, len_err := array_len(&r, "")
+	testing.expect_value(t, len_err, Error.OK)
+	testing.expect_value(t, n, 50_000)
+
+	last, last_err := read_int(&r, "49999")
+	testing.expect_value(t, last_err, Error.OK)
+	testing.expect_value(t, last, 49_999 & 9)
+}
+
+@(test)
+test_dense_object_buffer_growth :: proc(t: ^testing.T) {
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+	strings.write_byte(&b, '{')
+	for i in 0 ..< 20_000 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_string(&b, `"k`)
+		strings.write_int(&b, i)
+		strings.write_string(&b, `":`)
+		strings.write_int(&b, i)
+	}
+	strings.write_byte(&b, '}')
+
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	err := parse(&r, transmute([]byte)strings.to_string(b))
+	testing.expect_value(t, err, Error.OK)
+
+	v, v_err := read_int(&r, "k19999")
+	testing.expect_value(t, v_err, Error.OK)
+	testing.expect_value(t, v, 19_999)
+}
+
+@(test)
+test_scratch_overflow_chunks :: proc(t: ^testing.T) {
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, `{"big":"`)
+	for _ in 0 ..< 3000 {
+		strings.write_string(&b, `a\n`)
+	}
+	strings.write_string(&b, `"}`)
+
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	err := parse(&r, transmute([]byte)strings.to_string(b))
+	testing.expect_value(t, err, Error.OK)
+
+	for _ in 0 ..< 10 {
+		v, v_err := read_string(&r, "big")
+		testing.expect_value(t, v_err, Error.OK)
+		testing.expect_value(t, len(v), 6000)
+	}
+
+	err = parse(&r, transmute([]byte)strings.to_string(b))
+	testing.expect_value(t, err, Error.OK)
+	v, v_err := read_string(&r, "big")
+	testing.expect_value(t, v_err, Error.OK)
+	testing.expect_value(t, len(v), 6000)
+}

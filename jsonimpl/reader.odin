@@ -1,52 +1,196 @@
 package jsonimpl
 
+import "base:intrinsics"
 import "core:mem"
+import "core:simd"
 import "core:strings"
 import "core:unicode/utf8"
 
 init_reader :: proc(r: ^Reader, size := DEFAULT_READER_SIZE, allocator := context.allocator) {
 	r.backing_allocator = allocator
-	r.memory = make([]byte, size, allocator)
-	mem.arena_init(&r.arena, r.memory)
-	r.max_cap = 0
+	if size > 0 {
+		r.block = make([]byte, size, allocator)
+	}
 }
 
-BYTES_PER_ENTRY :: size_of(Lazy_Value) + size_of(KV) + size_of(ArrEntry)
+INITIAL_ENTRY_DIVISOR :: 32
+SCRATCH_DIVISOR :: 16
+MIN_SCRATCH_BYTES :: 1024
+CARVE_BYTES_PER_ENTRY :: size_of(Lazy_Value) + (size_of(u64) + size_of(u32)) * 2 + size_of(ArrEntry)
+
+scratch_alloc :: proc(r: ^Reader, n: int) -> []byte {
+	need := (n + 7) & ~int(7)
+	s := &r.scratch
+	if s.offset + need <= len(s.base) {
+		buf := s.base[s.offset:][:n]
+		s.offset += need
+		return buf
+	}
+	if s.overflow_offset + need <= len(s.overflow) {
+		buf := s.overflow[s.overflow_offset:][:n]
+		s.overflow_offset += need
+		return buf
+	}
+	payload := max(need, len(s.overflow) * 2, 4096)
+	raw := make([]byte, size_of(Scratch_Chunk) + payload, r.backing_allocator)
+	head := cast(^Scratch_Chunk)raw_data(raw)
+	head.next = s.chunks
+	head.size = len(raw)
+	s.chunks = head
+	s.overflow = raw[size_of(Scratch_Chunk):]
+	s.overflow_offset = need
+	return s.overflow[:n]
+}
+
+scratch_make :: proc(r: ^Reader, $T: typeid, count: int) -> []T {
+	return mem.slice_data_cast([]T, scratch_alloc(r, count * size_of(T)))
+}
+
+scratch_reset :: proc(r: ^Reader) {
+	s := &r.scratch
+	s.offset = 0
+	chunk := s.chunks
+	for chunk != nil {
+		next := chunk.next
+		chunk_bytes := mem.slice_ptr(cast(^byte)chunk, chunk.size)
+		delete(chunk_bytes, r.backing_allocator)
+		chunk = next
+	}
+	s.chunks = nil
+	s.overflow = nil
+	s.overflow_offset = 0
+}
+
+grow_slice :: proc(p: ^Parser_State, s: ^[]$T, used: u32, min_cap: u32) {
+	new_cap := max(u32(len(s^)) * 2, 64)
+	for new_cap < min_cap {
+		new_cap *= 2
+	}
+	grown := make([]T, new_cap, p.allocator)
+	copy(grown, s^[:used])
+	old := rawptr(raw_data(s^))
+	if old != nil && (uintptr(old) < p.block_start || uintptr(old) >= p.block_end) {
+		delete(s^, p.allocator)
+	}
+	s^ = grown
+}
+
+@(private)
+carve :: proc(block: []byte, off: ^int, $T: typeid, count: u32) -> []T {
+	start := off^
+	off^ += int(count) * size_of(T)
+	return mem.slice_data_cast([]T, block[start:off^])
+}
+
+@(private)
+carve_parser_buffers :: proc(r: ^Reader, guess: u32) {
+	p := &r.parser
+	off := 0
+	p.values = carve(r.block, &off, Lazy_Value, guess)
+	p.kv_keys = carve(r.block, &off, u64, guess)
+	p.kv_stack_keys = carve(r.block, &off, u64, guess)
+	p.kv_vals = carve(r.block, &off, u32, guess)
+	p.kv_stack_vals = carve(r.block, &off, u32, guess)
+	p.arr_buffer = carve(r.block, &off, ArrEntry, guess)
+	r.scratch.base = r.block[off:]
+	p.block_start = uintptr(raw_data(r.block))
+	p.block_end = p.block_start + uintptr(len(r.block))
+	r.block_cap = guess
+}
+
+@(private)
+outside_block :: proc(p: ^Parser_State, ptr: rawptr) -> bool {
+	return ptr != nil && (uintptr(ptr) < p.block_start || uintptr(ptr) >= p.block_end)
+}
+
+@(private)
+free_escaped_buffers :: proc(r: ^Reader) {
+	p := &r.parser
+	if outside_block(p, raw_data(p.values)) {
+		delete(p.values, p.allocator)
+	}
+	if outside_block(p, raw_data(p.kv_keys)) {
+		delete(p.kv_keys, p.allocator)
+	}
+	if outside_block(p, raw_data(p.kv_vals)) {
+		delete(p.kv_vals, p.allocator)
+	}
+	if outside_block(p, raw_data(p.kv_stack_keys)) {
+		delete(p.kv_stack_keys, p.allocator)
+	}
+	if outside_block(p, raw_data(p.kv_stack_vals)) {
+		delete(p.kv_stack_vals, p.allocator)
+	}
+	if outside_block(p, raw_data(p.arr_buffer)) {
+		delete(p.arr_buffer, p.allocator)
+	}
+	p.values = nil
+	p.kv_keys = nil
+	p.kv_vals = nil
+	p.kv_stack_keys = nil
+	p.kv_stack_vals = nil
+	p.arr_buffer = nil
+}
 
 parse :: proc(r: ^Reader, data: []byte) -> Error {
-	needed_cap := max(u32(len(data) / 4), 64)
+	guess := max(u32(len(data) / INITIAL_ENTRY_DIVISOR), 64)
 
-	if needed_cap > r.max_cap {
-		needed_bytes := int(needed_cap) * BYTES_PER_ENTRY + len(data) + 64
-		if needed_bytes > len(r.memory) {
-			delete(r.memory, r.backing_allocator)
-			r.memory = make([]byte, needed_bytes, r.backing_allocator)
-			mem.arena_init(&r.arena, r.memory)
-		} else {
-			mem.arena_free_all(&r.arena)
-		}
-		r.max_cap = needed_cap
+	p := &r.parser
+	p.allocator = r.backing_allocator
 
-		alloc := mem.arena_allocator(&r.arena)
-		r.parser.values = make([]Lazy_Value, needed_cap, alloc)
-		r.parser.kv_buffer = make([]KV, needed_cap, alloc)
-		r.parser.arr_buffer = make([]ArrEntry, needed_cap, alloc)
+	scratch_reset(r)
 
-		r.buffer_offset = r.arena.offset
-	} else {
-		r.arena.offset = r.buffer_offset
+	scratch_bytes := max(len(data) / SCRATCH_DIVISOR, MIN_SCRATCH_BYTES)
+	needed := int(guess) * CARVE_BYTES_PER_ENTRY + scratch_bytes
+	if needed > len(r.block) {
+		free_escaped_buffers(r)
+		delete(r.block, r.backing_allocator)
+		r.block = make([]byte, needed, r.backing_allocator)
+		carve_parser_buffers(r, guess)
+	} else if guess > r.block_cap {
+		free_escaped_buffers(r)
+		carve_parser_buffers(r, guess)
 	}
 
-	return parser_parse(&r.parser, string(data))
+	r.generation += 1
+
+	return parser_parse(p, string(data))
+}
+
+make_element :: #force_inline proc(r: ^Reader, idx: u32) -> Element {
+	when ODIN_DEBUG {
+		assert(
+			idx <= ELEMENT_INDEX_MASK,
+			"ojson: document has too many values for debug element tagging",
+		)
+		return Element(idx | (r.generation & 0xFF) << ELEMENT_INDEX_BITS)
+	} else {
+		return Element(idx)
+	}
+}
+
+element_index :: #force_inline proc(r: ^Reader, elem: Element) -> u32 {
+	when ODIN_DEBUG {
+		assert(
+			u32(elem) >> ELEMENT_INDEX_BITS == r.generation & 0xFF,
+			"ojson: Element used after its Reader was re-parsed",
+		)
+		return u32(elem) & ELEMENT_INDEX_MASK
+	} else {
+		return u32(elem)
+	}
 }
 
 destroy_reader :: proc(r: ^Reader) {
-	if r.memory != nil {
-		delete(r.memory, r.backing_allocator)
+	scratch_reset(r)
+	free_escaped_buffers(r)
+	if r.block != nil {
+		delete(r.block, r.backing_allocator)
 	}
 	r^ = {}
 }
 
+@(require_results)
 read_string :: proc(r: ^Reader, key: string) -> (value: string, err: Error) {
 	if r.parser.values == nil {
 		return "", .Not_Parsed
@@ -60,16 +204,18 @@ read_string :: proc(r: ^Reader, key: string) -> (value: string, err: Error) {
 	case .String:
 		return val.data.str, .OK
 	case .Raw_String:
-		return unescape_string(&r.arena, val.data.str), .OK
+		return unescape_string(r, val.data.str), .OK
 	}
 	return "", .Type_Mismatch
 }
 
+@(require_results)
 read_int :: proc(r: ^Reader, key: string) -> (value: int, err: Error) {
 	i, e := read_i64(r, key)
 	return int(i), e
 }
 
+@(require_results)
 read_i64 :: proc(r: ^Reader, key: string) -> (value: i64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
@@ -92,6 +238,7 @@ read_i64 :: proc(r: ^Reader, key: string) -> (value: i64, err: Error) {
 	return result, .OK
 }
 
+@(require_results)
 read_f64 :: proc(r: ^Reader, key: string) -> (value: f64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
@@ -114,6 +261,7 @@ read_f64 :: proc(r: ^Reader, key: string) -> (value: f64, err: Error) {
 	return result, .OK
 }
 
+@(require_results)
 read_bool :: proc(r: ^Reader, key: string) -> (value: bool, err: Error) {
 	if r.parser.values == nil {
 		return false, .Not_Parsed
@@ -138,6 +286,7 @@ read_bool :: proc(r: ^Reader, key: string) -> (value: bool, err: Error) {
 	return false, .Type_Mismatch
 }
 
+@(require_results)
 exists :: proc(r: ^Reader, key: string) -> bool {
 	if r.parser.values == nil {
 		return false
@@ -147,6 +296,7 @@ exists :: proc(r: ^Reader, key: string) -> bool {
 	return found
 }
 
+@(require_results)
 is_null :: proc(r: ^Reader, key: string) -> bool {
 	if r.parser.values == nil {
 		return false
@@ -156,6 +306,7 @@ is_null :: proc(r: ^Reader, key: string) -> bool {
 	return found && val.type == .Null
 }
 
+@(require_results)
 array_len :: proc(r: ^Reader, key: string) -> (int, Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
@@ -168,23 +319,102 @@ array_len :: proc(r: ^Reader, key: string) -> (int, Error) {
 	if val.type != .Array {
 		return 0, .Type_Mismatch
 	}
-	return int(val.data.container), .OK
+	return int(val.data.container.count), .OK
+}
+
+object_member_range :: #force_inline proc(p: ^Parser_State, obj_idx: u32) -> (u32, u32) {
+	if obj_idx >= p.values_len {
+		return 0, 0
+	}
+	val := p.values[obj_idx]
+	if val.type != .Object {
+		return 0, 0
+	}
+	return val.data.container.entries_begin, val.data.container.entries_end
+}
+
+kv_key :: #force_inline proc(p: ^Parser_State, i: u32) -> string {
+	packed := p.kv_keys[i]
+	return p.input[packed >> 32:(packed >> 32) + (packed & 0xFFFFFFFF)]
+}
+
+array_entries :: proc(p: ^Parser_State, arr_idx: u32) -> []ArrEntry {
+	if arr_idx >= p.values_len {
+		return nil
+	}
+	val := p.values[arr_idx]
+	if val.type != .Array {
+		return nil
+	}
+	return p.arr_buffer[val.data.container.entries_begin:val.data.container.entries_end]
 }
 
 object_get_idx :: proc(p: ^Parser_State, obj_idx: u32, key: string) -> (u32, bool) {
-	for &kv in p.kv_buffer[:p.kv_len] {
-		if kv.owner_idx == obj_idx && kv.key == key {
-			return kv.value_idx, true
+	begin, end := object_member_range(p, obj_idx)
+	klen := u64(len(key))
+
+	if begin < end {
+		packed := p.kv_keys[begin]
+		if packed & 0xFFFFFFFF == klen && p.input[packed >> 32:(packed >> 32) + klen] == key {
+			return p.kv_vals[begin], true
+		}
+	}
+	if begin + 1 < end {
+		packed := p.kv_keys[begin + 1]
+		if packed & 0xFFFFFFFF == klen && p.input[packed >> 32:(packed >> 32) + klen] == key {
+			return p.kv_vals[begin + 1], true
+		}
+	}
+
+	first := uint(key[0]) if len(key) > 0 else 0
+	hint_slot := (uint(len(key)) * 31 + first) & 7
+	hint := p.key_hints[hint_slot]
+	if hint >= 2 && begin + hint < end {
+		packed := p.kv_keys[begin + hint]
+		if packed & 0xFFFFFFFF == klen && p.input[packed >> 32:(packed >> 32) + klen] == key {
+			return p.kv_vals[begin + hint], true
+		}
+	}
+
+	i := begin + 2
+	if end - begin >= 16 {
+		klen4 := simd.u64x4(klen)
+		len_mask: simd.u64x4 : 0xFFFFFFFF
+		for i + 4 <= end {
+			chunk := intrinsics.unaligned_load(cast(^simd.u64x4)&p.kv_keys[i])
+			eq := simd.lanes_eq(chunk & len_mask, klen4)
+			if simd.reduce_or(eq) != 0 {
+				for j in i ..< i + 4 {
+					packed := p.kv_keys[j]
+					if packed & 0xFFFFFFFF == klen {
+						if p.input[packed >> 32:(packed >> 32) + klen] == key {
+							p.key_hints[hint_slot] = j - begin
+							return p.kv_vals[j], true
+						}
+					}
+				}
+			}
+			i += 4
+		}
+	}
+	for ; i < end; i += 1 {
+		packed := p.kv_keys[i]
+		if packed & 0xFFFFFFFF == klen {
+			if p.input[packed >> 32:(packed >> 32) + klen] == key {
+				p.key_hints[hint_slot] = i - begin
+				return p.kv_vals[i], true
+			}
 		}
 	}
 	if strings.index_byte(key, '\\') >= 0 {
 		return 0, false
 	}
-	for &kv in p.kv_buffer[:p.kv_len] {
-		if kv.owner_idx == obj_idx && has_escapes(kv.key) {
-			unescaped := unescape_string_temp(kv.key)
+	for m := begin; m < end; m += 1 {
+		k := kv_key(p, m)
+		if has_escapes(k) {
+			unescaped := unescape_string_temp(k)
 			if unescaped == key {
-				return kv.value_idx, true
+				return p.kv_vals[m], true
 			}
 		}
 	}
@@ -197,7 +427,7 @@ array_get_idx :: proc(p: ^Parser_State, arr_idx: u32, index: int) -> (u32, bool)
 		return 0, false
 	}
 	count := 0
-	for &entry in p.arr_buffer[:p.arr_len] {
+	for &entry in array_entries(p, arr_idx) {
 		if entry.owner_idx == arr_idx {
 			if count == index {
 				return entry.value_idx, true
@@ -213,7 +443,8 @@ parse_array_idx :: proc(key: string) -> (int, bool) {
 		return 0, false
 	}
 	result := 0
-	for c in key {
+	for i in 0 ..< len(key) {
+		c := key[i]
 		if c < '0' || c > '9' {
 			return 0, false
 		}
@@ -226,11 +457,11 @@ has_escapes :: proc(s: string) -> bool {
 	return strings.index_byte(s, '\\') >= 0
 }
 
-unescape_string :: proc(arena: ^mem.Arena, s: string) -> string {
+unescape_string :: proc(r: ^Reader, s: string) -> string {
 	if !has_escapes(s) {
 		return s
 	}
-	buf := make([]byte, len(s), mem.arena_allocator(arena))
+	buf := scratch_alloc(r, len(s))
 	return unescape_to(s, buf)
 }
 
@@ -359,9 +590,10 @@ parse_hex4 :: proc(s: string) -> (u32, bool) {
 	return result, true
 }
 
+@(require_results)
 get_string :: proc(data: []byte, key: string, allocator := context.allocator) -> (string, Error) {
 	r: Reader
-	init_reader(&r, max(len(data) * 4, 4096), allocator)
+	init_reader(&r, allocator = allocator)
 	defer destroy(&r)
 	if err := parse(&r, data); err != .OK {
 		return "", err
@@ -369,9 +601,10 @@ get_string :: proc(data: []byte, key: string, allocator := context.allocator) ->
 	return read_string(&r, key)
 }
 
+@(require_results)
 get_int :: proc(data: []byte, key: string, allocator := context.allocator) -> (int, Error) {
 	r: Reader
-	init_reader(&r, max(len(data) * 4, 4096), allocator)
+	init_reader(&r, allocator = allocator)
 	defer destroy(&r)
 	if err := parse(&r, data); err != .OK {
 		return 0, err
@@ -379,9 +612,10 @@ get_int :: proc(data: []byte, key: string, allocator := context.allocator) -> (i
 	return read_int(&r, key)
 }
 
+@(require_results)
 get_i64 :: proc(data: []byte, key: string, allocator := context.allocator) -> (i64, Error) {
 	r: Reader
-	init_reader(&r, max(len(data) * 4, 4096), allocator)
+	init_reader(&r, allocator = allocator)
 	defer destroy(&r)
 	if err := parse(&r, data); err != .OK {
 		return 0, err
@@ -389,9 +623,10 @@ get_i64 :: proc(data: []byte, key: string, allocator := context.allocator) -> (i
 	return read_i64(&r, key)
 }
 
+@(require_results)
 get_f64 :: proc(data: []byte, key: string, allocator := context.allocator) -> (f64, Error) {
 	r: Reader
-	init_reader(&r, max(len(data) * 4, 4096), allocator)
+	init_reader(&r, allocator = allocator)
 	defer destroy(&r)
 	if err := parse(&r, data); err != .OK {
 		return 0, err
@@ -399,9 +634,10 @@ get_f64 :: proc(data: []byte, key: string, allocator := context.allocator) -> (f
 	return read_f64(&r, key)
 }
 
+@(require_results)
 get_bool :: proc(data: []byte, key: string, allocator := context.allocator) -> (bool, Error) {
 	r: Reader
-	init_reader(&r, max(len(data) * 4, 4096), allocator)
+	init_reader(&r, allocator = allocator)
 	defer destroy(&r)
 	if err := parse(&r, data); err != .OK {
 		return false, err
@@ -410,17 +646,19 @@ get_bool :: proc(data: []byte, key: string, allocator := context.allocator) -> (
 	return read_bool(&r, key)
 }
 
+@(require_results)
 root_element :: proc(r: ^Reader) -> Element {
-	return Element(r.parser.root)
+	return make_element(r, r.parser.root)
 }
 
+@(require_results)
 element_at :: proc(r: ^Reader, path: string) -> (Element, Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
 
 	if len(path) == 0 {
-		return Element(r.parser.root), .OK
+		return make_element(r, r.parser.root), .OK
 	}
 
 	idx, found := get_idx_by_path_from(&r.parser, r.parser.root, path)
@@ -428,9 +666,10 @@ element_at :: proc(r: ^Reader, path: string) -> (Element, Error) {
 		return 0, .Key_Not_Found
 	}
 
-	return Element(idx), .OK
+	return make_element(r, idx), .OK
 }
 
+@(require_results)
 array_elements :: proc(r: ^Reader, path: string) -> ([]Element, Error) {
 	if r.parser.values == nil {
 		return nil, .Not_Parsed
@@ -446,9 +685,10 @@ array_elements :: proc(r: ^Reader, path: string) -> ([]Element, Error) {
 		return nil, .Type_Mismatch
 	}
 
-	return collect_array_elements(r, idx, val.data.container), .OK
+	return collect_array_elements(r, idx, val.data.container.count), .OK
 }
 
+@(require_results)
 array_element :: proc(r: ^Reader, path: string, index: int) -> (Element, Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
@@ -464,7 +704,7 @@ array_element :: proc(r: ^Reader, path: string, index: int) -> (Element, Error) 
 		return 0, .Type_Mismatch
 	}
 
-	if index < 0 || index >= int(val.data.container) {
+	if index < 0 || index >= int(val.data.container.count) {
 		return 0, .Key_Not_Found
 	}
 
@@ -473,9 +713,10 @@ array_element :: proc(r: ^Reader, path: string, index: int) -> (Element, Error) 
 		return 0, .Key_Not_Found
 	}
 
-	return Element(elem_idx), .OK
+	return make_element(r, elem_idx), .OK
 }
 
+@(require_results)
 obj_element :: proc(r: ^Reader, path: string, key: string) -> (Element, Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
@@ -496,60 +737,63 @@ obj_element :: proc(r: ^Reader, path: string, key: string) -> (Element, Error) {
 		return 0, .Key_Not_Found
 	}
 
-	return Element(elem_idx), .OK
+	return make_element(r, elem_idx), .OK
 }
 
+@(require_results)
 obj_element_from :: proc(r: ^Reader, elem: Element, key: string) -> (Element, Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
 
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	if val.type != .Object {
 		return 0, .Type_Mismatch
 	}
 
-	elem_idx, found := object_get_idx(&r.parser, u32(elem), key)
+	elem_idx, found := object_get_idx(&r.parser, element_index(r, elem), key)
 	if !found {
 		return 0, .Key_Not_Found
 	}
 
-	return Element(elem_idx), .OK
+	return make_element(r, elem_idx), .OK
 }
 
+@(require_results)
 array_element_from :: proc(r: ^Reader, elem: Element, index: int) -> (Element, Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
 
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	if val.type != .Array {
 		return 0, .Type_Mismatch
 	}
 
-	if index < 0 || index >= int(val.data.container) {
+	if index < 0 || index >= int(val.data.container.count) {
 		return 0, .Key_Not_Found
 	}
 
-	elem_idx, found := array_get_idx(&r.parser, u32(elem), index)
+	elem_idx, found := array_get_idx(&r.parser, element_index(r, elem), index)
 	if !found {
 		return 0, .Key_Not_Found
 	}
 
-	return Element(elem_idx), .OK
+	return make_element(r, elem_idx), .OK
 }
 
+@(require_results)
 array_elements_from :: proc(r: ^Reader, elem: Element) -> ([]Element, Error) {
 	if r.parser.values == nil {
 		return nil, .Not_Parsed
 	}
 
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	if val.type != .Array {
 		return nil, .Type_Mismatch
 	}
 
-	return collect_array_elements(r, u32(elem), val.data.container), .OK
+	return collect_array_elements(r, element_index(r, elem), val.data.container.count), .OK
 }
 
 collect_array_elements :: proc(r: ^Reader, arr_idx: u32, count: u32) -> []Element {
@@ -557,11 +801,11 @@ collect_array_elements :: proc(r: ^Reader, arr_idx: u32, count: u32) -> []Elemen
 		return nil
 	}
 
-	result := make([]Element, count, mem.arena_allocator(&r.arena))
+	result := scratch_make(r, Element, int(count))
 	i: u32 = 0
-	for &entry in r.parser.arr_buffer[:r.parser.arr_len] {
+	for &entry in array_entries(&r.parser, arr_idx) {
 		if entry.owner_idx == arr_idx {
-			result[i] = Element(entry.value_idx)
+			result[i] = make_element(r, entry.value_idx)
 			i += 1
 			if i >= count {
 				break
@@ -572,12 +816,13 @@ collect_array_elements :: proc(r: ^Reader, arr_idx: u32, count: u32) -> []Elemen
 	return result
 }
 
+@(require_results)
 read_string_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: string, err: Error) {
 	if r.parser.values == nil {
 		return "", .Not_Parsed
 	}
 
-	val, found := get_by_path_from(&r.parser, u32(elem), field)
+	val, found := get_by_path_from(&r.parser, element_index(r, elem), field)
 	if !found {
 		return "", .Key_Not_Found
 	}
@@ -586,23 +831,25 @@ read_string_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: st
 	case .String:
 		return val.data.str, .OK
 	case .Raw_String:
-		return unescape_string(&r.arena, val.data.str), .OK
+		return unescape_string(r, val.data.str), .OK
 	}
 
 	return "", .Type_Mismatch
 }
 
+@(require_results)
 read_int_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: int, err: Error) {
 	i, e := read_i64_elem(r, elem, field)
 	return int(i), e
 }
 
+@(require_results)
 read_i64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: i64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
 
-	val, found := get_by_path_from(&r.parser, u32(elem), field)
+	val, found := get_by_path_from(&r.parser, element_index(r, elem), field)
 	if !found {
 		return 0, .Key_Not_Found
 	}
@@ -621,12 +868,13 @@ read_i64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: i64, 
 	return result, .OK
 }
 
+@(require_results)
 read_f64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: f64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
 
-	val, found := get_by_path_from(&r.parser, u32(elem), field)
+	val, found := get_by_path_from(&r.parser, element_index(r, elem), field)
 	if !found {
 		return 0, .Key_Not_Found
 	}
@@ -645,12 +893,13 @@ read_f64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: f64, 
 	return result, .OK
 }
 
+@(require_results)
 read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool, err: Error) {
 	if r.parser.values == nil {
 		return false, .Not_Parsed
 	}
 
-	val, found := get_by_path_from(&r.parser, u32(elem), field)
+	val, found := get_by_path_from(&r.parser, element_index(r, elem), field)
 	if !found {
 		return false, .Key_Not_Found
 	}
@@ -671,33 +920,36 @@ read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool
 	return false, .Type_Mismatch
 }
 
+@(require_results)
 read_string_value :: proc(r: ^Reader, elem: Element) -> (value: string, err: Error) {
 	if r.parser.values == nil {
 		return "", .Not_Parsed
 	}
 
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	#partial switch val.type {
 	case .String:
 		return val.data.str, .OK
 	case .Raw_String:
-		return unescape_string(&r.arena, val.data.str), .OK
+		return unescape_string(r, val.data.str), .OK
 	}
 
 	return "", .Type_Mismatch
 }
 
+@(require_results)
 read_int_value :: proc(r: ^Reader, elem: Element) -> (value: int, err: Error) {
 	i, e := read_i64_value(r, elem)
 	return int(i), e
 }
 
+@(require_results)
 read_i64_value :: proc(r: ^Reader, elem: Element) -> (value: i64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
 
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	#partial switch val.type {
 	case .Number, .String, .Raw_String:
 	case:
@@ -712,12 +964,13 @@ read_i64_value :: proc(r: ^Reader, elem: Element) -> (value: i64, err: Error) {
 	return result, .OK
 }
 
+@(require_results)
 read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
 	if r.parser.values == nil {
 		return 0, .Not_Parsed
 	}
 
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	#partial switch val.type {
 	case .Number, .String, .Raw_String:
 	case:
@@ -732,12 +985,13 @@ read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
 	return result, .OK
 }
 
+@(require_results)
 read_bool_value :: proc(r: ^Reader, elem: Element) -> (value: bool, err: Error) {
 	if r.parser.values == nil {
 		return false, .Not_Parsed
 	}
 
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	#partial switch val.type {
 	case .True:
 		return true, .OK
@@ -754,6 +1008,7 @@ read_bool_value :: proc(r: ^Reader, elem: Element) -> (value: bool, err: Error) 
 	return false, .Type_Mismatch
 }
 
+@(require_results)
 read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
 	if r.parser.values == nil {
 		return "", .Not_Parsed
@@ -765,11 +1020,12 @@ read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
 	return extract_raw_value(&r.parser, idx)
 }
 
+@(require_results)
 read_raw_elem :: proc(r: ^Reader, elem: Element, field: string) -> (string, Error) {
 	if r.parser.values == nil {
 		return "", .Not_Parsed
 	}
-	idx, found := get_idx_by_path_from(&r.parser, u32(elem), field)
+	idx, found := get_idx_by_path_from(&r.parser, element_index(r, elem), field)
 	if !found {
 		return "", .Key_Not_Found
 	}
@@ -862,31 +1118,95 @@ scan_string_end :: proc(input: string, start: int) -> int {
 	return -1
 }
 
+@(require_results)
 element_value_type :: proc(r: ^Reader, elem: Element) -> Value_Type {
-	return r.parser.values[u32(elem)].type
+	return r.parser.values[element_index(r, elem)].type
 }
 
+@(require_results)
+array_iter :: proc(r: ^Reader, elem: Element) -> Array_Iterator {
+	idx := element_index(r, elem)
+	if idx >= r.parser.values_len {
+		return {}
+	}
+	val := r.parser.values[idx]
+	if val.type != .Array {
+		return {}
+	}
+	return Array_Iterator {
+		r = r,
+		arr_idx = idx,
+		pos = val.data.container.entries_begin,
+		end = val.data.container.entries_end,
+	}
+}
+
+@(require_results)
+array_iter_at :: proc(r: ^Reader, path: string) -> (Array_Iterator, Error) {
+	elem, err := element_at(r, path)
+	if err != .OK {
+		return {}, err
+	}
+	if element_value_type(r, elem) != .Array {
+		return {}, .Type_Mismatch
+	}
+	return array_iter(r, elem), .OK
+}
+
+@(require_results)
+next_element :: proc(it: ^Array_Iterator) -> (elem: Element, ok: bool) {
+	for it.pos < it.end {
+		entry := it.r.parser.arr_buffer[it.pos]
+		it.pos += 1
+		if entry.owner_idx == it.arr_idx {
+			return make_element(it.r, entry.value_idx), true
+		}
+	}
+	return 0, false
+}
+
+@(require_results)
+object_iter :: proc(r: ^Reader, elem: Element) -> Object_Iterator {
+	begin, end := object_member_range(&r.parser, element_index(r, elem))
+	return Object_Iterator{r = r, pos = begin, end = end}
+}
+
+@(require_results)
+object_iter_at :: proc(r: ^Reader, path: string) -> (Object_Iterator, Error) {
+	elem, err := element_at(r, path)
+	if err != .OK {
+		return {}, err
+	}
+	if element_value_type(r, elem) != .Object {
+		return {}, .Type_Mismatch
+	}
+	return object_iter(r, elem), .OK
+}
+
+@(require_results)
+next_pair :: proc(it: ^Object_Iterator) -> (key: string, value: Element, ok: bool) {
+	if it.pos >= it.end {
+		return "", 0, false
+	}
+	k := kv_key(&it.r.parser, it.pos)
+	v := it.r.parser.kv_vals[it.pos]
+	it.pos += 1
+	return k, make_element(it.r, v), true
+}
+
+@(require_results)
 object_keys :: proc(r: ^Reader, elem: Element) -> []string {
-	val := r.parser.values[u32(elem)]
+	val := r.parser.values[element_index(r, elem)]
 	if val.type != .Object {
 		return nil
 	}
-	count := 0
-	for &kv in r.parser.kv_buffer[:r.parser.kv_len] {
-		if kv.owner_idx == u32(elem) {
-			count += 1
-		}
-	}
-	if count == 0 {
+	begin, end := object_member_range(&r.parser, element_index(r, elem))
+	if begin == end {
 		return nil
 	}
-	result := make([]string, count, mem.arena_allocator(&r.arena))
-	i := 0
-	for &kv in r.parser.kv_buffer[:r.parser.kv_len] {
-		if kv.owner_idx == u32(elem) {
-			result[i] = kv.key
-			i += 1
-		}
+	result := scratch_make(r, string, int(end - begin))
+	for i in begin ..< end {
+		result[i - begin] = kv_key(&r.parser, i)
 	}
 	return result
 }
@@ -900,7 +1220,7 @@ get_by_path_from :: proc(p: ^Parser_State, start_idx: u32, path: string) -> (Laz
 	return p.values[idx], true
 }
 
-get_idx_by_path_from :: proc(p: ^Parser_State, start_idx: u32, path: string) -> (u32, bool) {
+get_idx_by_path_from :: #force_inline proc(p: ^Parser_State, start_idx: u32, path: string) -> (u32, bool) {
 	if p.values_len == 0 {
 		return 0, false
 	}
@@ -912,20 +1232,19 @@ get_idx_by_path_from :: proc(p: ^Parser_State, start_idx: u32, path: string) -> 
 	remaining := path
 
 	for remaining != "" {
-		dot_idx := strings.index_byte(remaining, '.')
-		key: string
-		if dot_idx < 0 {
-			key = remaining
-			remaining = ""
-		} else {
-			key = remaining[:dot_idx]
-			remaining = remaining[dot_idx + 1:]
-		}
-
 		current := p.values[current_idx]
 
-		if idx, ok := parse_array_idx(key); ok {
-			if current.type != .Array {
+		#partial switch current.type {
+		case .Array:
+			if idx, ok := parse_array_idx(remaining); ok {
+				return array_get_idx(p, current_idx, idx)
+			}
+			dot_idx := strings.index_byte(remaining, '.')
+			if dot_idx < 0 {
+				return 0, false
+			}
+			idx, ok := parse_array_idx(remaining[:dot_idx])
+			if !ok {
 				return 0, false
 			}
 			next_idx, found := array_get_idx(p, current_idx, idx)
@@ -933,17 +1252,24 @@ get_idx_by_path_from :: proc(p: ^Parser_State, start_idx: u32, path: string) -> 
 				return 0, false
 			}
 			current_idx = next_idx
-			continue
-		}
-
-		if current.type != .Object {
+			remaining = remaining[dot_idx + 1:]
+		case .Object:
+			if next_idx, found := object_get_idx(p, current_idx, remaining); found {
+				return next_idx, true
+			}
+			dot_idx := strings.index_byte(remaining, '.')
+			if dot_idx < 0 {
+				return 0, false
+			}
+			next_idx, found := object_get_idx(p, current_idx, remaining[:dot_idx])
+			if !found {
+				return 0, false
+			}
+			current_idx = next_idx
+			remaining = remaining[dot_idx + 1:]
+		case:
 			return 0, false
 		}
-		next_idx, found := object_get_idx(p, current_idx, key)
-		if !found {
-			return 0, false
-		}
-		current_idx = next_idx
 	}
 
 	return current_idx, true
