@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/Jonathan-Rowles/ojson/actions/workflows/ci.yml/badge.svg)](https://github.com/Jonathan-Rowles/ojson/actions/workflows/ci.yml)
 
-**SIMD-accelerated, lazy JSON field extraction for the [Odin programming language](https://odin-lang.org/).**
+**A fast, SIMD-accelerated JSON parser for the [Odin programming language](https://odin-lang.org/), built for lazy field extraction.**
 
-ojson parses JSON lazily: it walks the full document to index structure and positions, but defers type conversion and string unescaping until you read a field. SIMD-accelerated string and number scanning. Includes a code generator for type-safe unmarshalling and marshalling.
+ojson is a lazy JSON parser library for Odin: it walks the full document to index structure and positions, but defers type conversion and string unescaping until you read a field. SIMD-accelerated string and number scanning. Includes a code generator for type-safe unmarshalling and marshalling.
 
 ## Features
 
@@ -39,12 +39,6 @@ See [`benchmark/`](benchmark/) for the numbers.
 # Add as a submodule or copy to your project
 git clone https://github.com/jonathan-rowles/ojson
 ```
-
-## Building
-
-Build with `-o:speed`. Odin defaults to `-o:minimal`, and to `-o:none` when
-`-debug` is set. Measured on the benchmark, `-o:speed` is worth roughly 5x over
-`-o:none` and 3.5x over `-o:minimal`.
 
 ## Usage
 
