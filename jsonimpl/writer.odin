@@ -2,16 +2,18 @@ package jsonimpl
 
 import "core:bytes"
 import stdjson "core:encoding/json"
+import "core:math"
+import "core:strconv"
 import "core:unicode/utf8"
 
 init_writer :: proc(
+	w: ^Writer,
 	buffer_size := DEFAULT_WRITE_BUFFER_SIZE,
 	allocator := context.allocator,
-) -> Writer {
-	w: Writer
+) {
+	w^ = {}
 	w.allocator = allocator
 	bytes.buffer_init_allocator(&w.buffer, 0, buffer_size, allocator)
-	return w
 }
 
 marshal_to :: proc(w: ^Writer, value: any, pretty := false) -> (result: []byte, err: Error) {
@@ -107,33 +109,31 @@ write_int :: proc(w: ^Writer, v: int) {
 }
 
 write_f32 :: proc(w: ^Writer, v: f32) {
-	write_sep(w)
-	integer := int(v)
-	frac := int((v - f32(integer)) * 10)
-	if frac < 0 {
-		frac = -frac
-	}
-	buf: [20]byte
-	n := int_to_buf(buf[:], integer)
-	bytes.buffer_write(&w.buffer, buf[:n])
-	bytes.buffer_write_byte(&w.buffer, '.')
-	n2 := int_to_buf(buf[:], frac)
-	bytes.buffer_write(&w.buffer, buf[:n2])
+	write_float(w, f64(v), 32)
 }
 
 write_f64 :: proc(w: ^Writer, v: f64) {
+	write_float(w, v, 64)
+}
+
+@(private)
+write_float :: proc(w: ^Writer, v: f64, bit_size: int) {
 	write_sep(w)
-	integer := int(v)
-	frac := int((v - f64(integer)) * 10)
-	if frac < 0 {
-		frac = -frac
+	if math.is_nan(v) || math.is_inf(v) {
+		bytes.buffer_write_string(&w.buffer, "null")
+		return
 	}
-	buf: [20]byte
-	n := int_to_buf(buf[:], integer)
-	bytes.buffer_write(&w.buffer, buf[:n])
-	bytes.buffer_write_byte(&w.buffer, '.')
-	n2 := int_to_buf(buf[:], frac)
-	bytes.buffer_write(&w.buffer, buf[:n2])
+	magnitude := abs(v)
+	format: byte = 'f'
+	if magnitude != 0 && (magnitude < 1e-6 || magnitude >= 1e21) {
+		format = 'e'
+	}
+	buf: [48]byte
+	s := strconv.write_float(buf[:], v, format, -1, bit_size)
+	if s[0] == '+' {
+		s = s[1:]
+	}
+	bytes.buffer_write_string(&w.buffer, s)
 }
 
 write_bool :: proc(w: ^Writer, v: bool) {

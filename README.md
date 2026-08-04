@@ -63,7 +63,7 @@ for msg in messages {
     name, _ := oj.read_string(&r, "users.0.name")
     fmt.println(name)
 
-    items, _ := oj.array_iter_at(&r, "items")
+    items, _ := oj.array_iter(&r, "items")
     for item in oj.next(&items) {
         price, _ := oj.read_f64(&r, item, "price")
         fmt.println(price)
@@ -82,6 +82,11 @@ by_value, _ := oj.read_f64(&r, cell)                // the element's own value
 
 Reads are marked `@(require_results)`, so the error return has to be handled or
 explicitly discarded with `_`.
+
+Navigation procs take the same two shapes, one name each: `element`,
+`array_element`, `obj_element`, `array_elements`, `array_iter` and
+`object_iter` all accept either a path from the root or an `Element` you
+already hold.
 
 ### Iteration
 
@@ -103,7 +108,40 @@ invalidated by the next `parse`. Debug builds assert if you use a stale one.
 
 ```odin
 name, _ := oj.get_string(data, "user.name")
+defer delete(name)
 ```
+
+`get_string` clones the value with the given allocator so it outlives the
+temporary reader; the caller owns it.
+
+### Building JSON
+
+`write` resolves on the value type, and on arity for key/value pairs inside
+objects. Floats use shortest round-trip formatting; NaN and infinity are
+written as `null`.
+
+```odin
+w: oj.Writer
+oj.init(&w)
+defer oj.destroy(&w)
+
+oj.write_object_start(&w)
+oj.write(&w, "name", "Alice")
+oj.write(&w, "age", 30)
+oj.write(&w, "score", 3.25)
+oj.write_key(&w, "tags")
+oj.write_array_start(&w)
+oj.write(&w, "a")
+oj.write(&w, "b")
+oj.write_array_end(&w)
+oj.write_object_end(&w)
+
+fmt.println(oj.writer_string(&w)) // {"name":"Alice","age":30,"score":3.25,"tags":["a","b"]}
+```
+
+`write_f32`, `write_field_null` and `write_field_raw` sit outside the `write`
+group (their signatures would collide with the string members); call them by
+name.
 
 ### Code generation
 
@@ -140,7 +178,8 @@ oj.parse(&r, data)
 order, err := oj_gen.unmarshal_order(&r)
 
 // Marshal
-w := oj.init_writer()
+w: oj.Writer
+oj.init(&w)
 defer oj.destroy(&w)
 oj_gen.marshal_order(&w, order)
 result := oj.writer_string(&w)

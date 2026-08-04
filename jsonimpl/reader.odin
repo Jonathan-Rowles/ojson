@@ -598,7 +598,11 @@ get_string :: proc(data: []byte, key: string, allocator := context.allocator) ->
 	if err := parse(&r, data); err != .OK {
 		return "", err
 	}
-	return read_string(&r, key)
+	value, err := read_string(&r, key)
+	if err != .OK {
+		return "", err
+	}
+	return strings.clone(value, allocator), .OK
 }
 
 @(require_results)

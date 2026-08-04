@@ -1,6 +1,8 @@
 #+build !js
 package jsonimpl
 
+import stdjson "core:encoding/json"
+import "core:math"
 import "core:strings"
 import "core:testing"
 
@@ -352,12 +354,24 @@ test_get_string :: proc(t: ^testing.T) {
 	data := `{"name": "alice", "user": {"email": "alice@test.com"}}`
 
 	name, name_err := get_string(transmute([]byte)data, "name")
+	defer delete(name)
 	testing.expect_value(t, name_err, Error.OK)
 	testing.expect_value(t, name, "alice")
 
 	email, email_err := get_string(transmute([]byte)data, "user.email")
+	defer delete(email)
 	testing.expect_value(t, email_err, Error.OK)
 	testing.expect_value(t, email, "alice@test.com")
+}
+
+@(test)
+test_get_string_escaped_outlives_reader :: proc(t: ^testing.T) {
+	data := `{"note": "line1\nline2 \"quoted\""}`
+
+	note, err := get_string(transmute([]byte)data, "note")
+	defer delete(note)
+	testing.expect_value(t, err, Error.OK)
+	testing.expect_value(t, note, "line1\nline2 \"quoted\"")
 }
 
 @(test)
@@ -413,7 +427,8 @@ test_get_type_mismatch :: proc(t: ^testing.T) {
 
 @(test)
 test_writer_basic :: proc(t: ^testing.T) {
-	w := init_writer()
+	w: Writer
+	init_writer(&w)
 	defer destroy_writer(&w)
 
 	data := struct {
@@ -428,7 +443,8 @@ test_writer_basic :: proc(t: ^testing.T) {
 
 @(test)
 test_writer_escapes_control_characters :: proc(t: ^testing.T) {
-	w := init_writer()
+	w: Writer
+	init_writer(&w)
 	defer destroy_writer(&w)
 
 	write_string(&w, "a\x00b\x01c\x1fd")
@@ -437,7 +453,8 @@ test_writer_escapes_control_characters :: proc(t: ^testing.T) {
 
 @(test)
 test_writer_escapes_mixed_control_and_utf8 :: proc(t: ^testing.T) {
-	w := init_writer()
+	w: Writer
+	init_writer(&w)
 	defer destroy_writer(&w)
 
 	write_string(&w, "tab\there\x0bverté世\x1a")
@@ -446,7 +463,8 @@ test_writer_escapes_mixed_control_and_utf8 :: proc(t: ^testing.T) {
 
 @(test)
 test_writer_short_escapes :: proc(t: ^testing.T) {
-	w := init_writer()
+	w: Writer
+	init_writer(&w)
 	defer destroy_writer(&w)
 
 	write_string(&w, "\"\\\b\f\n\r\t")
@@ -455,7 +473,8 @@ test_writer_short_escapes :: proc(t: ^testing.T) {
 
 @(test)
 test_writer_key_escapes_control_characters :: proc(t: ^testing.T) {
-	w := init_writer()
+	w: Writer
+	init_writer(&w)
 	defer destroy_writer(&w)
 
 	write_object_start(&w)
@@ -466,8 +485,46 @@ test_writer_key_escapes_control_characters :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_writer_float_round_trip :: proc(t: ^testing.T) {
+	w: Writer
+	init_writer(&w)
+	defer destroy_writer(&w)
+
+	write_array_start(&w)
+	write_f64(&w, 3.25)
+	write_f64(&w, 0.001)
+	write_f64(&w, -2.5)
+	write_f64(&w, 0)
+	write_f64(&w, 123456789.123456789)
+	write_f32(&w, 0.1)
+	write_array_end(&w)
+	testing.expect_value(t, writer_string(&w), `[3.25,0.001,-2.5,0,123456789.12345679,0.1]`)
+}
+
+@(test)
+test_writer_float_extremes :: proc(t: ^testing.T) {
+	w: Writer
+	init_writer(&w)
+	defer destroy_writer(&w)
+
+	write_array_start(&w)
+	write_f64(&w, 1e21)
+	write_f64(&w, 1e-7)
+	write_f64(&w, math.nan_f64())
+	write_f64(&w, math.inf_f64(1))
+	write_array_end(&w)
+
+	out := writer_string(&w)
+	reparsed, err := stdjson.parse(transmute([]byte)out)
+	testing.expect(t, err == nil, "extreme float output must be valid JSON")
+	stdjson.destroy_value(reparsed)
+	testing.expect_value(t, out, `[1e+21,1e-07,null,null]`)
+}
+
+@(test)
 test_writer_reuse :: proc(t: ^testing.T) {
-	w := init_writer()
+	w: Writer
+	init_writer(&w)
 	defer destroy_writer(&w)
 
 	data1 := struct {
