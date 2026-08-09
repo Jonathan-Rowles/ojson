@@ -104,8 +104,37 @@ write_string :: proc(w: ^Writer, s: string) {
 write_int :: proc(w: ^Writer, v: int) {
 	write_sep(w)
 	buf: [20]byte
-	n := int_to_buf(buf[:], v)
+	n := int_to_buf(buf[:], i64(v))
 	bytes.buffer_write(&w.buffer, buf[:n])
+}
+
+write_u64 :: proc(w: ^Writer, v: u64) {
+	write_sep(w)
+	buf: [20]byte
+	n := u64_to_buf(buf[:], v)
+	bytes.buffer_write(&w.buffer, buf[:n])
+}
+
+write_key_i64 :: proc(w: ^Writer, k: i64) {
+	write_sep(w)
+	buf: [20]byte
+	n := int_to_buf(buf[:], k)
+	bytes.buffer_write_byte(&w.buffer, '"')
+	bytes.buffer_write(&w.buffer, buf[:n])
+	bytes.buffer_write_byte(&w.buffer, '"')
+	bytes.buffer_write_byte(&w.buffer, ':')
+	w.needs_sep[w.depth] = false
+}
+
+write_key_u64 :: proc(w: ^Writer, k: u64) {
+	write_sep(w)
+	buf: [20]byte
+	n := u64_to_buf(buf[:], k)
+	bytes.buffer_write_byte(&w.buffer, '"')
+	bytes.buffer_write(&w.buffer, buf[:n])
+	bytes.buffer_write_byte(&w.buffer, '"')
+	bytes.buffer_write_byte(&w.buffer, ':')
+	w.needs_sep[w.depth] = false
 }
 
 write_f32 :: proc(w: ^Writer, v: f32) {
@@ -202,28 +231,27 @@ write_escaped :: proc(w: ^Writer, s: string) {
 }
 
 @(private)
-int_to_buf :: proc(buf: []byte, val: int) -> int {
+int_to_buf :: proc(buf: []byte, val: i64) -> int {
+	if val >= 0 {
+		return u64_to_buf(buf, u64(val))
+	}
+	buf[0] = '-'
+	return 1 + u64_to_buf(buf[1:], -u64(val))
+}
+
+@(private)
+u64_to_buf :: proc(buf: []byte, val: u64) -> int {
 	if val == 0 {
 		buf[0] = '0'
 		return 1
 	}
 
 	v := val
-	neg := false
-	if v < 0 {
-		neg = true
-		v = -v
-	}
-
 	i := len(buf)
 	for v > 0 {
 		i -= 1
 		buf[i] = byte('0' + v % 10)
 		v /= 10
-	}
-	if neg {
-		i -= 1
-		buf[i] = '-'
 	}
 
 	n := len(buf) - i

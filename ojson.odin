@@ -245,6 +245,16 @@ next :: proc {
 	next_pair,
 }
 
+@(require_results)
+unescape_string :: proc(r: ^Reader, s: string) -> string {
+	return oj.unescape_string(r, s)
+}
+
+@(require_results)
+parse_int_key :: proc($T: typeid, key: string) -> (value: T, ok: bool) {
+	return oj.parse_int_key(T, key)
+}
+
 // Reading a named field of an element.
 
 @(require_results)
@@ -372,6 +382,18 @@ write_string :: proc(w: ^Writer, s: string) {
 
 write_int :: proc(w: ^Writer, v: int) {
 	oj.write_int(w, v)
+}
+
+write_u64 :: proc(w: ^Writer, v: u64) {
+	oj.write_u64(w, v)
+}
+
+write_key_i64 :: proc(w: ^Writer, k: i64) {
+	oj.write_key_i64(w, k)
+}
+
+write_key_u64 :: proc(w: ^Writer, k: u64) {
+	oj.write_key_u64(w, k)
 }
 
 write_f32 :: proc(w: ^Writer, v: f32) {

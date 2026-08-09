@@ -13,6 +13,55 @@ Options :: struct {
 	verbose:      bool `args:"name=v" usage:"Verbose output"`,
 }
 
+absolute_dir :: proc(dir: string, allocator := context.allocator) -> (abs: string, ok: bool) {
+	if fp.is_abs(dir) {
+		cleaned, _ := fp.clean(dir, allocator)
+		return cleaned, true
+	}
+
+	working_dir, wd_err := os.get_working_directory(allocator)
+	if wd_err != nil {
+		return dir, false
+	}
+
+	joined, _ := fp.join({working_dir, dir}, allocator)
+	cleaned, _ := fp.clean(joined, allocator)
+	return cleaned, true
+}
+
+skipped_field_warnings :: proc(
+	structs: []Struct_Info,
+	allocator := context.allocator,
+) -> [dynamic]string {
+	warnings := make([dynamic]string, allocator)
+	for s in structs {
+		for f in s.fields {
+			skipped := f.type_kind == .Unknown
+			reason := "is not supported"
+			if !skipped && s.is_tuple && !is_primitive_kind(f.type_kind) {
+				skipped = true
+				reason = "is not supported in a tuple struct"
+			}
+			if !skipped {
+				continue
+			}
+			type_desc := f.type_text != "" ? f.type_text : "its type"
+			append(
+				&warnings,
+				fmt.aprintf(
+					"%s.%s skipped: %s %s",
+					s.name,
+					f.odin_name,
+					type_desc,
+					reason,
+					allocator = allocator,
+				),
+			)
+		}
+	}
+	return warnings
+}
+
 main :: proc() {
 	opts: Options
 	opts.output = "gen/ojson.gen.odin"
@@ -46,13 +95,24 @@ main :: proc() {
 
 	all_structs := make([dynamic]Struct_Info)
 	output_dir := fp.dir(opts.output)
-	abs_output_dir, _ := fp.abs(output_dir, context.allocator)
+	abs_output_dir, abs_ok := absolute_dir(output_dir)
+	if !abs_ok {
+		fmt.eprintfln("Error: Could not resolve output directory: %s", output_dir)
+		os.exit(1)
+	}
 
 	g_constants = make(map[string]int, allocator = context.allocator)
 	defer delete(g_constants)
 
+	named_types := Named_Types {
+		enums     = make(map[string]bool, allocator = context.allocator),
+		distincts = make(map[string]string, allocator = context.allocator),
+	}
+	defer delete(named_types.enums)
+	defer delete(named_types.distincts)
+
 	for file in files {
-		collect_file_constants(file)
+		collect_file_declarations(file, &named_types)
 	}
 
 	if opts.verbose && len(g_constants) > 0 {
@@ -128,7 +188,12 @@ main :: proc() {
 		}
 	}
 
+	resolve_named_types(all_structs[:], named_types)
 	resolve_unions(&all_unions, all_structs[:])
+
+	for warning in skipped_field_warnings(all_structs[:]) {
+		fmt.eprintfln("Warning: %s", warning)
+	}
 
 	if len(all_structs) == 0 && len(all_unions) == 0 {
 		fmt.eprintln("No structs or unions with json tags found")
@@ -163,7 +228,7 @@ main :: proc() {
 	)
 
 	if output_dir != "" && output_dir != "." {
-		os.make_directory(output_dir)
+		os.make_directory_all(output_dir)
 	}
 
 	write_err := os.write_entire_file(opts.output, transmute([]byte)code)

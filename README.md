@@ -4,32 +4,23 @@
 
 **A fast, SIMD-accelerated JSON parser for the [Odin programming language](https://odin-lang.org/), built for lazy field extraction.**
 
-ojson is a lazy JSON parser library for Odin: it walks the full document to index structure and positions, but defers type conversion and string unescaping until you read a field. SIMD-accelerated string and number scanning. Includes a code generator for type-safe unmarshalling and marshalling.
-
-## Features
-
-- Lazy parsing with deferred type conversion
+- Lazy parsing: structure is indexed up front, type conversion and unescaping happen when you read a field
 - SIMD-accelerated string and number scanning
 - Reusable reader that amortizes allocation across many messages
 - Non-allocating iteration over arrays and object key/value pairs
 - Code generation for struct unmarshalling and marshalling
-- `omitempty` support for skipping zero-valued fields during marshal
 
 ## When to use ojson over `core:encoding/json`
-
-ojson never builds a document tree, so it is fast when you parse a message,
-take the fields you need and move on. The standard library builds an owned
-`json.Value` tree: a map allocation per object, but O(1) lookups afterwards.
 
 Use **ojson** when you read a few known fields per message, process a stream of
 messages through one reusable `Reader`, or need steady-state parsing that does
 not allocate. Strings come back as views into the input, so there is nothing to
 free.
 
-Use **`core:encoding/json`** when you hold one parsed document and query it
-repeatedly, need `map[K]V` or unknown object keys, want `unmarshal` with no
-build step, or need the parsed data to outlive the input buffer. ojson's
-strings and `Element` handles are invalidated by the next `parse`.
+Use **`core:encoding/json`** when you query one document repeatedly, need the
+parsed data to outlive the input buffer, or want `unmarshal` with no build
+step. ojson's strings and `Element` handles are invalidated by the next
+`parse`.
 
 See [`benchmark/`](benchmark/) for the numbers.
 
@@ -65,38 +56,34 @@ for msg in messages {
 }
 ```
 
-`read_string`, `read_int`, `read_i64`, `read_f64` and `read_bool` each take
-three argument shapes:
+Reads and navigation procs accept a path from the root, a named field of an
+`Element`, or an `Element` itself:
 
 ```odin
-by_path,  _ := oj.read_f64(&r, "book.bids.0.price") // value at a path
-by_field, _ := oj.read_f64(&r, level, "amount")     // named field of an element
-by_value, _ := oj.read_f64(&r, cell)                // the element's own value
+by_path,  _ := oj.read_f64(&r, "book.bids.0.price")
+by_field, _ := oj.read_f64(&r, level, "amount")
+by_value, _ := oj.read_f64(&r, cell)
 ```
-
-Reads are marked `@(require_results)`, so the error return has to be handled or
-explicitly discarded with `_`.
-
-Navigation procs take the same two shapes, one name each: `element`,
-`array_element`, `obj_element`, `array_elements`, `array_iter` and
-`object_iter` all accept either a path from the root or an `Element` you
-already hold.
 
 ### Iteration
 
-`array_iter` and `object_iter` walk containers without allocating.
-`array_elements` and `object_keys` still exist for when you need a slice to
-keep.
+`array_iter` and `object_iter` walk containers without allocating;
+`array_elements` and `object_keys` return slices when you need one to keep.
+Keys come back raw, so decode escapes with `unescape_string` (free when there
+are none).
 
 ```odin
 it := oj.object_iter(&r, elem)
-for key, value in oj.next(&it) {
+for raw_key, value in oj.next(&it) {
+    key := oj.unescape_string(&r, raw_key)
     fmt.println(key, oj.element_value_type(&r, value))
 }
 ```
 
 `Element` handles and returned strings point into the reader and are
-invalidated by the next `parse`. Debug builds assert if you use a stale one.
+invalidated by the next `parse`; debug builds assert on stale use. A failed
+`parse` leaves the reader empty: every read returns `.Not_Parsed` until the
+next successful `parse`.
 
 ### One-shot
 
@@ -105,14 +92,15 @@ name, _ := oj.get_string(data, "user.name")
 defer delete(name)
 ```
 
-`get_string` clones the value with the given allocator so it outlives the
-temporary reader; the caller owns it.
+`get_string` clones the value so it outlives the temporary reader; the caller
+owns it.
 
 ### Building JSON
 
-`write` resolves on the value type, and on arity for key/value pairs inside
-objects. Floats use shortest round-trip formatting; NaN and infinity are
-written as `null`.
+`write` resolves on the value type, and on arity for key/value pairs. Floats
+use shortest round-trip formatting; NaN and infinity are written as `null`.
+`write_u64` covers unsigned values above `i64` range, and `write_key_i64` /
+`write_key_u64` write integer object keys.
 
 ```odin
 w: oj.Writer
@@ -132,10 +120,6 @@ oj.write_object_end(&w)
 
 fmt.println(oj.writer_string(&w)) // {"name":"Alice","age":30,"score":3.25,"tags":["a","b"]}
 ```
-
-`write_f32`, `write_field_null` and `write_field_raw` sit outside the `write`
-group (their signatures would collide with the string members); call them by
-name.
 
 ### Code generation
 
@@ -179,11 +163,34 @@ oj_gen.marshal_order(&w, order)
 result := oj.writer_string(&w)
 ```
 
-Fields tagged with `omitempty` are skipped during marshal when they have their zero value (`""` for strings, `0` for numbers, `false` for bools, empty for slices).
+### Field types
 
-## Not Yet Supported
+```odin
+Status :: enum { Idle = 0, Active = 7 }
+Entity_ID :: distinct int
 
-The following types are not currently supported by the code generator:
+Profile :: struct {
+    name:     string            `json:"name"`,
+    address:  ^Address          `json:"address"`,
+    labels:   map[string]string `json:"labels"`,
+    by_state: map[Status]int    `json:"by_state"`,
+    links:    []Entity_ID       `json:"links,omitempty"`,
+}
+```
 
-- **Pointers (`^T`)**: detected by the parser but generated code won't compile
-- **Maps (`map[K]V`)**
+- Strings, numbers, bools, nested structs, tagged unions, slices, dynamic and
+  fixed arrays.
+- `omitempty` drops a field from marshal output at its zero value.
+- `^T` is optional: a missing key, `null` or mistyped value leaves it `nil`,
+  anything else is allocated with `new` and owned by the caller. Marshal
+  writes `null`, or drops the field under `omitempty`.
+- `map[K]V` is a JSON object with string, integer or enum keys. Integer keys
+  are range-checked, and an entry with a non-numeric or out-of-range key or a
+  mistyped value is skipped. Marshal uses Odin's map iteration order.
+- An enum is its integer value; a distinct type reads and writes as its base
+  type. Both work as fields, in containers, behind pointers and as map values,
+  resolved across every scanned file.
+- A field the generator cannot express is skipped with a warning at generation
+  time and a `TODO` comment in the output, which still compiles: containers of
+  containers, pointers inside containers, distinct types from non-primitives,
+  and map keys beyond string/integer/enum.

@@ -33,7 +33,17 @@ Type_Kind :: enum {
 	Fixed_Array_Primitive, // [10]int, [5]string, etc.
 	Fixed_Array_Struct, // [10]User
 	Fixed_Array_Union, // [10]Shape
+	Pointer_Primitive, // ^int, ^string, etc.
+	Pointer_Struct, // ^User, ^Shape
+	Map_Primitive, // map[string]int, map[Status]f64
+	Map_Struct, // map[string]User, map[int]Shape
 	Unknown,
+}
+
+Element_Kind :: enum {
+	None,
+	Enum,
+	Distinct,
 }
 
 Field_Info :: struct {
@@ -42,7 +52,10 @@ Field_Info :: struct {
 	type_kind:    Type_Kind,
 	type_name:    string,
 	element_type: string,
-	base_type:    string,
+	key_type:     string, // Key type of a map field: string, an integer type or an enum
+	base_type:    string, // Type a distinct type was declared from
+	type_text:    string,
+	element_kind: Element_Kind, // Element, pointee or map value names an enum or distinct type
 	array_size:   int, // For fixed-size arrays like [10]T
 	omitempty:    bool,
 	raw:          bool, // `raw` option: string fields hold unparsed JSON, emitted/read as-is
@@ -70,6 +83,11 @@ Union_Info :: struct {
 	source_file:    string,
 	source_package: string,
 	source_dir:     string,
+}
+
+Named_Types :: struct {
+	enums:     map[string]bool,
+	distincts: map[string]string,
 }
 
 CLI_Options :: struct {

@@ -155,14 +155,24 @@ is_zero_field_expr :: proc(field: Field_Info) -> string {
 		return fmt.tprintf("v.%s == 0", field.odin_name)
 	case .Bool:
 		return fmt.tprintf("!v.%s", field.odin_name)
-	case .Enum, .Distinct:
+	case .Enum:
 		return fmt.tprintf("int(v.%s) == 0", field.odin_name)
+	case .Distinct:
+		operand, zero := distinct_zero_operand(
+			field.base_type,
+			fmt.tprintf("v.%s", field.odin_name),
+		)
+		return fmt.tprintf("%s == %s", operand, zero)
 	case .Array_Primitive, .Array_Struct, .Array_Union:
 		return fmt.tprintf("len(v.%s) == 0", field.odin_name)
 	case .Dynamic_Primitive, .Dynamic_Struct, .Dynamic_Union:
 		return fmt.tprintf("len(v.%s) == 0", field.odin_name)
 	case .Fixed_Array_Primitive, .Fixed_Array_Struct, .Fixed_Array_Union:
 		return "true"
+	case .Pointer_Primitive, .Pointer_Struct:
+		return fmt.tprintf("v.%s == nil", field.odin_name)
+	case .Map_Primitive, .Map_Struct:
+		return fmt.tprintf("len(v.%s) == 0", field.odin_name)
 	case .Struct:
 		return fmt.tprintf(
 			"is_zero_%s(v.%s)",
@@ -229,6 +239,7 @@ generate_unmarshal_proc :: proc(sb: ^strings.Builder, info: Struct_Info, ctx: ^G
 		}
 	}
 
+	strings.write_string(sb, "\terr = .OK\n")
 	strings.write_string(sb, "\treturn\n")
 	strings.write_string(sb, "}\n")
 }
@@ -464,9 +475,10 @@ generate_field_read :: proc(
 		fmt.sbprintf(sb, "\t}}\n\n")
 
 	case .Distinct:
+		read_proc, temp_type := distinct_value_read(field.base_type)
 		fmt.sbprintf(sb, "\t{{\n")
-		fmt.sbprintf(sb, "\t\tval: int\n")
-		fmt.sbprintf(sb, "\t\tval, err = %sread_int_elem(r, elem, \"%s\")\n", oj, field.json_name)
+		fmt.sbprintf(sb, "\t\tval: %s\n", temp_type)
+		fmt.sbprintf(sb, "\t\tval, err = %s%s(r, elem, \"%s\")\n", oj, read_proc, field.json_name)
 		strings.write_string(sb, "\t\tif err != .OK && err != .Key_Not_Found && err != .Type_Mismatch do return\n")
 		fmt.sbprintf(
 			sb,
@@ -515,6 +527,15 @@ generate_field_read :: proc(
 	case .Fixed_Array_Struct:
 		generate_fixed_array_struct_read(sb, field, parent, ctx)
 
+	case .Pointer_Primitive:
+		generate_pointer_primitive_read(sb, field, parent, ctx)
+
+	case .Pointer_Struct:
+		generate_pointer_struct_read(sb, field, parent, ctx)
+
+	case .Map_Primitive, .Map_Struct:
+		generate_map_read(sb, field, parent, ctx)
+
 	case .Union:
 		generate_union_field_read(sb, field, ctx)
 
@@ -533,6 +554,7 @@ generate_array_primitive_read :: proc(
 	ctx: ^Gen_Context,
 ) {
 	oj := ctx.oj
+	elem_type := qualified_element_type(field, get_type_prefix(parent, ctx))
 
 	fmt.sbprintf(sb, "\t{{\n")
 	fmt.sbprintf(
@@ -547,7 +569,7 @@ generate_array_primitive_read :: proc(
 		sb,
 		"\t\t\tresult.%s = make([]%s, len(items))\n",
 		field.odin_name,
-		field.element_type,
+		elem_type,
 	)
 	fmt.sbprintf(sb, "\t\t\tfor item_elem, i in items {{\n")
 
@@ -588,23 +610,14 @@ generate_array_primitive_read :: proc(
 			oj,
 		)
 	case:
-		if is_integer_type(field.element_type) {
-			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %sread_i64_elem(r, item_elem, \"\")\n", oj)
+		if read_proc, read_ok := element_read_proc(field); read_ok {
+			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %s%s(r, item_elem, \"\")\n", oj, read_proc)
 			fmt.sbprintf(sb, "\t\t\t\terr = read_err\n")
 			fmt.sbprintf(
 				sb,
 				"\t\t\t\tresult.%s[i] = %s(val)\n",
 				field.odin_name,
-				field.element_type,
-			)
-		} else if is_float_type(field.element_type) {
-			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %sread_f64_elem(r, item_elem, \"\")\n", oj)
-			fmt.sbprintf(sb, "\t\t\t\terr = read_err\n")
-			fmt.sbprintf(
-				sb,
-				"\t\t\t\tresult.%s[i] = %s(val)\n",
-				field.odin_name,
-				field.element_type,
+				elem_type,
 			)
 		} else {
 			fmt.sbprintf(sb, "\t\t\t\t// TODO: handle element type %s\n", field.element_type)
@@ -663,6 +676,7 @@ generate_dynamic_primitive_read :: proc(
 	ctx: ^Gen_Context,
 ) {
 	oj := ctx.oj
+	elem_type := qualified_element_type(field, get_type_prefix(parent, ctx))
 
 	fmt.sbprintf(sb, "\t{{\n")
 	fmt.sbprintf(
@@ -677,7 +691,7 @@ generate_dynamic_primitive_read :: proc(
 		sb,
 		"\t\t\tresult.%s = make([dynamic]%s, 0, len(items))\n",
 		field.odin_name,
-		field.element_type,
+		elem_type,
 	)
 	fmt.sbprintf(sb, "\t\t\tfor item_elem in items {{\n")
 
@@ -708,25 +722,15 @@ generate_dynamic_primitive_read :: proc(
 		fmt.sbprintf(sb, "\t\t\t\tif err != .OK do return\n")
 		fmt.sbprintf(sb, "\t\t\t\tappend(&result.%s, val)\n", field.odin_name)
 	case:
-		if is_integer_type(field.element_type) {
-			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %sread_i64_elem(r, item_elem, \"\")\n", oj)
+		if read_proc, read_ok := element_read_proc(field); read_ok {
+			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %s%s(r, item_elem, \"\")\n", oj, read_proc)
 			fmt.sbprintf(sb, "\t\t\t\terr = read_err\n")
 			fmt.sbprintf(sb, "\t\t\t\tif err != .OK do return\n")
 			fmt.sbprintf(
 				sb,
 				"\t\t\t\tappend(&result.%s, %s(val))\n",
 				field.odin_name,
-				field.element_type,
-			)
-		} else if is_float_type(field.element_type) {
-			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %sread_f64_elem(r, item_elem, \"\")\n", oj)
-			fmt.sbprintf(sb, "\t\t\t\terr = read_err\n")
-			fmt.sbprintf(sb, "\t\t\t\tif err != .OK do return\n")
-			fmt.sbprintf(
-				sb,
-				"\t\t\t\tappend(&result.%s, %s(val))\n",
-				field.odin_name,
-				field.element_type,
+				elem_type,
 			)
 		} else {
 			fmt.sbprintf(sb, "\t\t\t\t// TODO: handle element type %s\n", field.element_type)
@@ -781,6 +785,7 @@ generate_fixed_array_primitive_read :: proc(
 	ctx: ^Gen_Context,
 ) {
 	oj := ctx.oj
+	elem_type := qualified_element_type(field, get_type_prefix(parent, ctx))
 
 	fmt.sbprintf(sb, "\t{{\n")
 	fmt.sbprintf(
@@ -831,23 +836,14 @@ generate_fixed_array_primitive_read :: proc(
 			oj,
 		)
 	case:
-		if is_integer_type(field.element_type) {
-			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %sread_i64_elem(r, item_elem, \"\")\n", oj)
+		if read_proc, read_ok := element_read_proc(field); read_ok {
+			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %s%s(r, item_elem, \"\")\n", oj, read_proc)
 			fmt.sbprintf(sb, "\t\t\t\terr = read_err\n")
 			fmt.sbprintf(
 				sb,
 				"\t\t\t\tresult.%s[i] = %s(val)\n",
 				field.odin_name,
-				field.element_type,
-			)
-		} else if is_float_type(field.element_type) {
-			fmt.sbprintf(sb, "\t\t\t\tval, read_err := %sread_f64_elem(r, item_elem, \"\")\n", oj)
-			fmt.sbprintf(sb, "\t\t\t\terr = read_err\n")
-			fmt.sbprintf(
-				sb,
-				"\t\t\t\tresult.%s[i] = %s(val)\n",
-				field.odin_name,
-				field.element_type,
+				elem_type,
 			)
 		} else {
 			fmt.sbprintf(sb, "\t\t\t\t// TODO: handle element type %s\n", field.element_type)
@@ -892,6 +888,269 @@ generate_fixed_array_struct_read :: proc(
 	fmt.sbprintf(sb, "\t}}\n\n")
 }
 
+generate_pointer_primitive_read :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	parent: Struct_Info,
+	ctx: ^Gen_Context,
+) {
+	oj := ctx.oj
+	elem_type := qualified_element_type(field, get_type_prefix(parent, ctx))
+
+	read_proc, needs_cast, ok := primitive_value_read(field)
+	if !ok {
+		fmt.sbprintf(sb, "\t// TODO: handle pointer element type %s\n\n", field.element_type)
+		return
+	}
+
+	fmt.sbprintf(sb, "\t{{\n")
+	fmt.sbprintf(
+		sb,
+		"\t\tptr_elem, ptr_err := %sobj_element_from(r, elem, \"%s\")\n",
+		oj,
+		field.json_name,
+	)
+	fmt.sbprintf(
+		sb,
+		"\t\tif ptr_err == .OK && %selement_value_type(r, ptr_elem) != .Null {{\n",
+		oj,
+	)
+	fmt.sbprintf(sb, "\t\t\tval, val_err := %s%s(r, ptr_elem)\n", oj, read_proc)
+	fmt.sbprintf(sb, "\t\t\tif val_err == .OK {{\n")
+	fmt.sbprintf(sb, "\t\t\t\tptr := new(%s)\n", elem_type)
+	if needs_cast {
+		fmt.sbprintf(sb, "\t\t\t\tptr^ = %s(val)\n", elem_type)
+	} else {
+		fmt.sbprintf(sb, "\t\t\t\tptr^ = val\n")
+	}
+	fmt.sbprintf(sb, "\t\t\t\tresult.%s = ptr\n", field.odin_name)
+	fmt.sbprintf(sb, "\t\t\t}}\n")
+	fmt.sbprintf(sb, "\t\t}}\n")
+	fmt.sbprintf(sb, "\t}}\n\n")
+}
+
+generate_pointer_struct_read :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	parent: Struct_Info,
+	ctx: ^Gen_Context,
+) {
+	oj := ctx.oj
+	tp := get_type_prefix(parent, ctx)
+	elem_lower := to_snake_case(field.element_type)
+
+	fmt.sbprintf(sb, "\t{{\n")
+	fmt.sbprintf(
+		sb,
+		"\t\tptr_elem, ptr_err := %sobj_element_from(r, elem, \"%s\")\n",
+		oj,
+		field.json_name,
+	)
+	fmt.sbprintf(
+		sb,
+		"\t\tif ptr_err == .OK && %selement_value_type(r, ptr_elem) == .Object {{\n",
+		oj,
+	)
+	fmt.sbprintf(sb, "\t\t\tval, val_err := unmarshal_%s_elem(r, ptr_elem)\n", elem_lower)
+	fmt.sbprintf(sb, "\t\t\tif val_err != .OK do return result, val_err\n")
+	fmt.sbprintf(sb, "\t\t\tptr := new(%s%s)\n", tp, field.element_type)
+	fmt.sbprintf(sb, "\t\t\tptr^ = val\n")
+	fmt.sbprintf(sb, "\t\t\tresult.%s = ptr\n", field.odin_name)
+	fmt.sbprintf(sb, "\t\t}}\n")
+	fmt.sbprintf(sb, "\t}}\n\n")
+}
+
+Map_Key_Kind :: enum {
+	String,
+	Integer,
+	Enum,
+}
+
+map_key_kind :: proc(key_type: string) -> Map_Key_Kind {
+	if key_type == "" || key_type == "string" {
+		return .String
+	}
+	if is_integer_type(key_type) {
+		return .Integer
+	}
+	return .Enum
+}
+
+generate_map_read :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	parent: Struct_Info,
+	ctx: ^Gen_Context,
+) {
+	oj := ctx.oj
+	tp := get_type_prefix(parent, ctx)
+	key_kind := map_key_kind(field.key_type)
+
+	key_type := key_kind == .Enum ? fmt.tprintf("%s%s", tp, field.key_type) : field.key_type
+	if key_kind == .String {
+		key_type = "string"
+	}
+
+	value_type := qualified_element_type(field, tp)
+	read_proc, needs_cast, read_ok := "", false, true
+	if field.type_kind == .Map_Struct {
+		value_type = fmt.tprintf("%s%s", tp, field.element_type)
+	} else {
+		read_proc, needs_cast, read_ok = primitive_value_read(field)
+	}
+
+	if !read_ok {
+		fmt.sbprintf(sb, "\t// TODO: handle map value type %s\n\n", field.element_type)
+		return
+	}
+
+	fmt.sbprintf(sb, "\t{{\n")
+	fmt.sbprintf(
+		sb,
+		"\t\tmap_elem, map_err := %sobj_element_from(r, elem, \"%s\")\n",
+		oj,
+		field.json_name,
+	)
+	fmt.sbprintf(sb, "\t\tif map_err == .OK && %selement_value_type(r, map_elem) == .Object {{\n", oj)
+	fmt.sbprintf(sb, "\t\t\tresult.%s = make(map[%s]%s)\n", field.odin_name, key_type, value_type)
+	fmt.sbprintf(sb, "\t\t\tit := %sobject_iter(r, map_elem)\n", oj)
+	fmt.sbprintf(sb, "\t\t\tfor raw_key, val_elem in %snext_pair(&it) {{\n", oj)
+	if field.type_kind == .Map_Struct {
+		fmt.sbprintf(sb, "\t\t\t\tif %selement_value_type(r, val_elem) != .Object do continue\n", oj)
+	}
+	fmt.sbprintf(sb, "\t\t\t\tkey := %sunescape_string(r, raw_key)\n", oj)
+
+	key_expr := "key"
+	switch key_kind {
+	case .String:
+	case .Integer:
+		fmt.sbprintf(sb, "\t\t\t\tkey_num, key_ok := %sparse_int_key(%s, key)\n", oj, field.key_type)
+		strings.write_string(sb, "\t\t\t\tif !key_ok do continue\n")
+		key_expr = "key_num"
+	case .Enum:
+		fmt.sbprintf(sb, "\t\t\t\tkey_num, key_ok := %sparse_int_key(int, key)\n", oj)
+		strings.write_string(sb, "\t\t\t\tif !key_ok do continue\n")
+		key_expr = fmt.tprintf("%s(key_num)", key_type)
+	}
+
+	if field.type_kind == .Map_Struct {
+		elem_lower := to_snake_case(field.element_type)
+		fmt.sbprintf(sb, "\t\t\t\tval, val_err := unmarshal_%s_elem(r, val_elem)\n", elem_lower)
+		fmt.sbprintf(sb, "\t\t\t\tif val_err != .OK do return result, val_err\n")
+	} else {
+		fmt.sbprintf(sb, "\t\t\t\tval, val_err := %s%s(r, val_elem)\n", oj, read_proc)
+		fmt.sbprintf(sb, "\t\t\t\tif val_err != .OK do continue\n")
+	}
+
+	value_expr := needs_cast ? fmt.tprintf("%s(val)", value_type) : "val"
+	fmt.sbprintf(sb, "\t\t\t\tresult.%s[%s] = %s\n", field.odin_name, key_expr, value_expr)
+	fmt.sbprintf(sb, "\t\t\t}}\n")
+	fmt.sbprintf(sb, "\t\t}}\n")
+	fmt.sbprintf(sb, "\t}}\n\n")
+}
+
+generate_map_write :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	indent: string,
+	ctx: ^Gen_Context,
+) {
+	oj := ctx.oj
+	key_kind := map_key_kind(field.key_type)
+
+	fmt.sbprintf(sb, "%s%swrite_object_start(w)\n", indent, oj)
+	fmt.sbprintf(sb, "%sfor key, item in value.%s {{\n", indent, field.odin_name)
+
+	switch key_kind {
+	case .String:
+		fmt.sbprintf(sb, "%s\t%swrite_key(w, key)\n", indent, oj)
+	case .Integer:
+		if is_unsigned_integer_type(field.key_type) {
+			fmt.sbprintf(sb, "%s\t%swrite_key_u64(w, u64(key))\n", indent, oj)
+		} else {
+			fmt.sbprintf(sb, "%s\t%swrite_key_i64(w, i64(key))\n", indent, oj)
+		}
+	case .Enum:
+		fmt.sbprintf(sb, "%s\t%swrite_key_i64(w, i64(key))\n", indent, oj)
+	}
+
+	if field.type_kind == .Map_Struct {
+		fmt.sbprintf(sb, "%s\tmarshal_%s(w, item)\n", indent, to_snake_case(field.element_type))
+	} else if call, ok := primitive_write_call(oj, field, "item"); ok {
+		fmt.sbprintf(sb, "%s\t%s\n", indent, call)
+	} else {
+		fmt.sbprintf(sb, "%s\t// TODO: handle map value type %s\n", indent, field.element_type)
+	}
+
+	fmt.sbprintf(sb, "%s}}\n", indent)
+	fmt.sbprintf(sb, "%s%swrite_object_end(w)\n", indent, oj)
+}
+
+primitive_value_read :: proc(field: Field_Info) -> (read_proc: string, needs_cast: bool, ok: bool) {
+	base := element_base_type(field)
+	needs_cast = field.element_kind != .None
+	switch base {
+	case "string":
+		return "read_string_value", needs_cast, true
+	case "int":
+		return "read_int_value", needs_cast, true
+	case "i64":
+		return "read_i64_value", needs_cast, true
+	case "f64":
+		return "read_f64_value", needs_cast, true
+	case "bool":
+		return "read_bool_value", needs_cast, true
+	}
+	if is_integer_type(base) || field.element_kind == .Enum {
+		return "read_i64_value", true, true
+	}
+	if is_float_type(base) {
+		return "read_f64_value", true, true
+	}
+	return "", false, false
+}
+
+primitive_write_call :: proc(oj: string, field: Field_Info, expr: string) -> (call: string, ok: bool) {
+	base := element_base_type(field)
+
+	if field.element_kind == .None {
+		switch base {
+		case "string":
+			return fmt.tprintf("%swrite_string(w, %s)", oj, expr), true
+		case "int":
+			return fmt.tprintf("%swrite_int(w, %s)", oj, expr), true
+		case "bool":
+			return fmt.tprintf("%swrite_bool(w, %s)", oj, expr), true
+		case "f64":
+			return fmt.tprintf("%swrite_f64(w, %s)", oj, expr), true
+		case "f32":
+			return fmt.tprintf("%swrite_f32(w, %s)", oj, expr), true
+		case "f16":
+			return fmt.tprintf("%swrite_f32(w, f32(%s))", oj, expr), true
+		case "u64", "uint":
+			return fmt.tprintf("%swrite_u64(w, u64(%s))", oj, expr), true
+		}
+		if is_integer_type(base) {
+			return fmt.tprintf("%swrite_int(w, int(%s))", oj, expr), true
+		}
+		return "", false
+	}
+
+	switch {
+	case base == "string":
+		return fmt.tprintf("%swrite_string(w, string(%s))", oj, expr), true
+	case base == "bool":
+		return fmt.tprintf("%swrite_bool(w, bool(%s))", oj, expr), true
+	case is_float_type(base):
+		return fmt.tprintf("%swrite_f64(w, f64(%s))", oj, expr), true
+	case base == "u64" || base == "uint":
+		return fmt.tprintf("%swrite_u64(w, u64(%s))", oj, expr), true
+	case is_integer_type(base) || field.element_kind == .Enum:
+		return fmt.tprintf("%swrite_int(w, int(%s))", oj, expr), true
+	}
+	return "", false
+}
+
 to_snake_case :: proc(s: string, allocator := context.allocator) -> string {
 	if len(s) == 0 {
 		return ""
@@ -915,6 +1174,83 @@ to_snake_case :: proc(s: string, allocator := context.allocator) -> string {
 	}
 
 	return strings.to_string(sb)
+}
+
+distinct_value_read :: proc(base_type: string) -> (read_proc: string, temp_type: string) {
+	switch {
+	case base_type == "string":
+		return "read_string_elem", "string"
+	case base_type == "bool":
+		return "read_bool_elem", "bool"
+	case is_float_type(base_type):
+		return "read_f64_elem", "f64"
+	case is_integer_type(base_type) && base_type != "int":
+		return "read_i64_elem", "i64"
+	}
+	return "read_int_elem", "int"
+}
+
+distinct_write_call :: proc(oj: string, base_type: string, expr: string) -> string {
+	switch {
+	case base_type == "string":
+		return fmt.tprintf("%swrite_string(w, string(%s))", oj, expr)
+	case base_type == "bool":
+		return fmt.tprintf("%swrite_bool(w, bool(%s))", oj, expr)
+	case is_float_type(base_type):
+		return fmt.tprintf("%swrite_f64(w, f64(%s))", oj, expr)
+	case base_type == "u64" || base_type == "uint":
+		return fmt.tprintf("%swrite_u64(w, u64(%s))", oj, expr)
+	}
+	return fmt.tprintf("%swrite_int(w, int(%s))", oj, expr)
+}
+
+distinct_zero_operand :: proc(base_type: string, expr: string) -> (operand: string, zero: string) {
+	switch {
+	case base_type == "string":
+		return fmt.tprintf("string(%s)", expr), `""`
+	case base_type == "bool":
+		return fmt.tprintf("bool(%s)", expr), "false"
+	case is_float_type(base_type):
+		return fmt.tprintf("f64(%s)", expr), "0"
+	}
+	return fmt.tprintf("int(%s)", expr), "0"
+}
+
+qualified_element_type :: proc(field: Field_Info, type_prefix: string) -> string {
+	if field.element_kind != .None {
+		return fmt.tprintf("%s%s", type_prefix, field.element_type)
+	}
+	return field.element_type
+}
+
+element_base_type :: proc(field: Field_Info) -> string {
+	if field.element_kind == .Distinct {
+		return field.base_type
+	}
+	return field.element_type
+}
+
+element_read_proc :: proc(field: Field_Info) -> (read_proc: string, ok: bool) {
+	base := element_base_type(field)
+	switch {
+	case is_integer_type(base) || field.element_kind == .Enum:
+		return "read_i64_elem", true
+	case is_float_type(base):
+		return "read_f64_elem", true
+	case base == "string":
+		return "read_string_elem", true
+	case base == "bool":
+		return "read_bool_elem", true
+	}
+	return "", false
+}
+
+is_unsigned_integer_type :: proc(type_name: string) -> bool {
+	switch type_name {
+	case "u8", "u16", "u32", "u64", "uint":
+		return true
+	}
+	return false
 }
 
 is_integer_type :: proc(type_name: string) -> bool {
@@ -973,11 +1309,21 @@ omitempty_zero_check :: proc(field: Field_Info) -> (check: string, has_check: bo
 		return fmt.tprintf("value.%s != 0", field.odin_name), true
 	case .Bool:
 		return fmt.tprintf("value.%s", field.odin_name), true
-	case .Enum, .Distinct:
+	case .Enum:
 		return fmt.tprintf("int(value.%s) != 0", field.odin_name), true
+	case .Distinct:
+		operand, zero := distinct_zero_operand(
+			field.base_type,
+			fmt.tprintf("value.%s", field.odin_name),
+		)
+		return fmt.tprintf("%s != %s", operand, zero), true
 	case .Array_Primitive, .Array_Struct, .Array_Union:
 		return fmt.tprintf("len(value.%s) > 0", field.odin_name), true
 	case .Dynamic_Primitive, .Dynamic_Struct, .Dynamic_Union:
+		return fmt.tprintf("len(value.%s) > 0", field.odin_name), true
+	case .Pointer_Primitive, .Pointer_Struct:
+		return fmt.tprintf("value.%s != nil", field.odin_name), true
+	case .Map_Primitive, .Map_Struct:
 		return fmt.tprintf("len(value.%s) > 0", field.odin_name), true
 	case .Struct:
 		return fmt.tprintf(
@@ -1008,7 +1354,9 @@ generate_field_write :: proc(
 		}
 	}
 
-	fmt.sbprintf(sb, "%s%swrite_key(w, \"%s\")\n", indent, oj, field.json_name)
+	if field.type_kind != .Unknown {
+		fmt.sbprintf(sb, "%s%swrite_key(w, \"%s\")\n", indent, oj, field.json_name)
+	}
 
 	switch field.type_kind {
 	case .String:
@@ -1027,12 +1375,17 @@ generate_field_write :: proc(
 		fmt.sbprintf(sb, "%s%swrite_f32(w, value.%s)\n", indent, oj, field.odin_name)
 	case .F64:
 		fmt.sbprintf(sb, "%s%swrite_f64(w, value.%s)\n", indent, oj, field.odin_name)
-	case .I64, .I8, .I16, .I32, .U8, .U16, .U32, .U64, .Uint:
+	case .I64, .I8, .I16, .I32, .U8, .U16, .U32:
 		fmt.sbprintf(sb, "%s%swrite_int(w, int(value.%s))\n", indent, oj, field.odin_name)
+	case .U64, .Uint:
+		fmt.sbprintf(sb, "%s%swrite_u64(w, u64(value.%s))\n", indent, oj, field.odin_name)
 	case .F16:
 		fmt.sbprintf(sb, "%s%swrite_f32(w, f32(value.%s))\n", indent, oj, field.odin_name)
-	case .Enum, .Distinct:
+	case .Enum:
 		fmt.sbprintf(sb, "%s%swrite_int(w, int(value.%s))\n", indent, oj, field.odin_name)
+	case .Distinct:
+		call := distinct_write_call(oj, field.base_type, fmt.tprintf("value.%s", field.odin_name))
+		fmt.sbprintf(sb, "%s%s\n", indent, call)
 	case .Struct:
 		nested_lower := to_snake_case(field.type_name)
 		fmt.sbprintf(sb, "%smarshal_%s(w, value.%s)\n", indent, nested_lower, field.odin_name)
@@ -1040,6 +1393,10 @@ generate_field_write :: proc(
 		generate_array_primitive_write(sb, field, ctx)
 	case .Array_Struct, .Dynamic_Struct, .Fixed_Array_Struct:
 		generate_array_struct_write(sb, field, ctx)
+	case .Pointer_Primitive, .Pointer_Struct:
+		generate_pointer_write(sb, field, indent, field.omitempty, ctx)
+	case .Map_Primitive, .Map_Struct:
+		generate_map_write(sb, field, indent, ctx)
 	case .Union:
 		generate_union_field_write(sb, field, indent, ctx)
 	case .Array_Union, .Dynamic_Union, .Fixed_Array_Union:
@@ -1075,12 +1432,16 @@ generate_value_write :: proc(
 		fmt.sbprintf(sb, "\t%swrite_f32(w, %s)\n", oj, expr)
 	case .F64:
 		fmt.sbprintf(sb, "\t%swrite_f64(w, %s)\n", oj, expr)
-	case .I64, .I8, .I16, .I32, .U8, .U16, .U32, .U64, .Uint:
+	case .I64, .I8, .I16, .I32, .U8, .U16, .U32:
 		fmt.sbprintf(sb, "\t%swrite_int(w, int(%s))\n", oj, expr)
+	case .U64, .Uint:
+		fmt.sbprintf(sb, "\t%swrite_u64(w, u64(%s))\n", oj, expr)
 	case .F16:
 		fmt.sbprintf(sb, "\t%swrite_f32(w, f32(%s))\n", oj, expr)
-	case .Enum, .Distinct:
+	case .Enum:
 		fmt.sbprintf(sb, "\t%swrite_int(w, int(%s))\n", oj, expr)
+	case .Distinct:
+		fmt.sbprintf(sb, "\t%s\n", distinct_write_call(oj, field.base_type, expr))
 	case:
 		fmt.sbprintf(sb, "\t// TODO: tuple field type %v\n", field.type_kind)
 	}
@@ -1109,16 +1470,11 @@ generate_array_primitive_write :: proc(
 		fmt.sbprintf(sb, "\t\t%swrite_f64(w, item)\n", oj)
 	case "bool":
 		fmt.sbprintf(sb, "\t\t%swrite_bool(w, item)\n", oj)
+	case "u64", "uint":
+		fmt.sbprintf(sb, "\t\t%swrite_u64(w, u64(item))\n", oj)
 	case:
-		if is_integer_type(field.element_type) {
-			fmt.sbprintf(sb, "\t\t%swrite_int(w, int(item))\n", oj)
-		} else if is_float_type(field.element_type) {
-			elem := field.element_type
-			if elem == "f16" {
-				fmt.sbprintf(sb, "\t\t%swrite_f32(w, f32(item))\n", oj)
-			} else {
-				fmt.sbprintf(sb, "\t\t%swrite_f32(w, item)\n", oj)
-			}
+		if call, call_ok := primitive_write_call(oj, field, "item"); call_ok {
+			fmt.sbprintf(sb, "\t\t%s\n", call)
 		} else {
 			fmt.sbprintf(sb, "\t\t// TODO: handle element type %s\n", field.element_type)
 		}
@@ -1126,6 +1482,38 @@ generate_array_primitive_write :: proc(
 
 	fmt.sbprintf(sb, "\t}}\n")
 	fmt.sbprintf(sb, "\t%swrite_array_end(w)\n", oj)
+}
+
+generate_pointer_write :: proc(
+	sb: ^strings.Builder,
+	field: Field_Info,
+	indent: string,
+	nil_guarded: bool,
+	ctx: ^Gen_Context,
+) {
+	oj := ctx.oj
+	inner := indent
+
+	if !nil_guarded {
+		fmt.sbprintf(sb, "%sif value.%s != nil {{\n", indent, field.odin_name)
+		inner = fmt.tprintf("%s\t", indent)
+	}
+
+	deref := fmt.tprintf("value.%s^", field.odin_name)
+	if field.type_kind == .Pointer_Struct {
+		elem_lower := to_snake_case(field.element_type)
+		fmt.sbprintf(sb, "%smarshal_%s(w, %s)\n", inner, elem_lower, deref)
+	} else if call, ok := primitive_write_call(oj, field, deref); ok {
+		fmt.sbprintf(sb, "%s%s\n", inner, call)
+	} else {
+		fmt.sbprintf(sb, "%s// TODO: handle pointer element type %s\n", inner, field.element_type)
+	}
+
+	if !nil_guarded {
+		fmt.sbprintf(sb, "%s}} else {{\n", indent)
+		fmt.sbprintf(sb, "%s\t%swrite_null(w)\n", indent, oj)
+		fmt.sbprintf(sb, "%s}}\n", indent)
+	}
 }
 
 generate_array_struct_write :: proc(sb: ^strings.Builder, field: Field_Info, ctx: ^Gen_Context) {

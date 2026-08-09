@@ -92,6 +92,7 @@ Reader :: struct {
 	block_cap:         u32,
 	backing_allocator: mem.Allocator,
 	generation:        u32,
+	parse_failed:      bool,
 }
 
 Array_Iterator :: struct {

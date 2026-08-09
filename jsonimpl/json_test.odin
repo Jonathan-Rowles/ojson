@@ -1062,3 +1062,100 @@ test_scratch_overflow_chunks :: proc(t: ^testing.T) {
 	testing.expect_value(t, v_err, Error.OK)
 	testing.expect_value(t, len(v), 6000)
 }
+
+@(test)
+test_read_after_failed_parse :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	ok_err := parse(&r, transmute([]byte)string(`{"value": 1}`))
+	testing.expect_value(t, ok_err, Error.OK)
+
+	bad_err := parse(&r, transmute([]byte)string(`{"value": `))
+	testing.expect(t, bad_err != .OK, "expected parse to fail")
+
+	_, read_err := read_int(&r, "value")
+	testing.expect_value(t, read_err, Error.Not_Parsed)
+
+	_, elem_err := element_at(&r, "")
+	testing.expect_value(t, elem_err, Error.Not_Parsed)
+
+	recover_err := parse(&r, transmute([]byte)string(`{"value": 3}`))
+	testing.expect_value(t, recover_err, Error.OK)
+	v, v_err := read_int(&r, "value")
+	testing.expect_value(t, v_err, Error.OK)
+	testing.expect_value(t, v, 3)
+}
+
+@(test)
+test_parse_int_key_ranges :: proc(t: ^testing.T) {
+	Case :: struct {
+		key:      string,
+		expected: i64,
+		ok:       bool,
+	}
+
+	u8_cases := []Case{{"0", 0, true}, {"255", 255, true}, {"256", 0, false}, {"-1", 0, false}}
+	for c in u8_cases {
+		v, ok := parse_int_key(u8, c.key)
+		testing.expect_value(t, ok, c.ok)
+		testing.expect_value(t, i64(v), c.ok ? c.expected : 0)
+	}
+
+	i8_cases := []Case{{"-128", -128, true}, {"127", 127, true}, {"128", 0, false}, {"-129", 0, false}}
+	for c in i8_cases {
+		v, ok := parse_int_key(i8, c.key)
+		testing.expect_value(t, ok, c.ok)
+		testing.expect_value(t, i64(v), c.ok ? c.expected : 0)
+	}
+
+	max_u64, max_u64_ok := parse_int_key(u64, "18446744073709551615")
+	testing.expect_value(t, max_u64_ok, true)
+	testing.expect_value(t, max_u64, max(u64))
+
+	_, wrap_ok := parse_int_key(u64, "18446744073709551616")
+	testing.expect_value(t, wrap_ok, false)
+
+	min_i64, min_i64_ok := parse_int_key(i64, "-9223372036854775808")
+	testing.expect_value(t, min_i64_ok, true)
+	testing.expect_value(t, min_i64, min(i64))
+
+	_, under_ok := parse_int_key(i64, "-9223372036854775809")
+	testing.expect_value(t, under_ok, false)
+
+	_, hex_ok := parse_int_key(int, "0x10")
+	testing.expect_value(t, hex_ok, false)
+
+	_, plus_ok := parse_int_key(int, "+7")
+	testing.expect_value(t, plus_ok, false)
+
+	_, empty_ok := parse_int_key(int, "")
+	testing.expect_value(t, empty_ok, false)
+
+	_, dash_ok := parse_int_key(int, "-")
+	testing.expect_value(t, dash_ok, false)
+
+	zeros, zeros_ok := parse_int_key(int, "007")
+	testing.expect_value(t, zeros_ok, true)
+	testing.expect_value(t, zeros, 7)
+}
+
+@(test)
+test_writer_u64_and_int_keys :: proc(t: ^testing.T) {
+	w: Writer
+	init_writer(&w)
+	defer destroy_writer(&w)
+
+	write_object_start(&w)
+	write_key_u64(&w, max(u64))
+	write_u64(&w, max(u64))
+	write_key_i64(&w, min(i64))
+	write_int(&w, min(int))
+	write_key_i64(&w, 0)
+	write_u64(&w, 0)
+	write_object_end(&w)
+
+	expected := `{"18446744073709551615":18446744073709551615,"-9223372036854775808":-9223372036854775808,"0":0}`
+	testing.expect_value(t, writer_string(&w), expected)
+}

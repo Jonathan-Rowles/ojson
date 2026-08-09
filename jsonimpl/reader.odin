@@ -154,7 +154,14 @@ parse :: proc(r: ^Reader, data: []byte) -> Error {
 
 	r.generation += 1
 
-	return parser_parse(p, string(data))
+	err := parser_parse(p, string(data))
+	r.parse_failed = err != .OK
+	return err
+}
+
+@(private)
+reader_ready :: #force_inline proc(r: ^Reader) -> bool {
+	return r.parser.values != nil && !r.parse_failed
 }
 
 make_element :: #force_inline proc(r: ^Reader, idx: u32) -> Element {
@@ -192,7 +199,7 @@ destroy_reader :: proc(r: ^Reader) {
 
 @(require_results)
 read_string :: proc(r: ^Reader, key: string) -> (value: string, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return "", .Not_Parsed
 	}
 
@@ -217,7 +224,7 @@ read_int :: proc(r: ^Reader, key: string) -> (value: int, err: Error) {
 
 @(require_results)
 read_i64 :: proc(r: ^Reader, key: string) -> (value: i64, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -240,7 +247,7 @@ read_i64 :: proc(r: ^Reader, key: string) -> (value: i64, err: Error) {
 
 @(require_results)
 read_f64 :: proc(r: ^Reader, key: string) -> (value: f64, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -263,7 +270,7 @@ read_f64 :: proc(r: ^Reader, key: string) -> (value: f64, err: Error) {
 
 @(require_results)
 read_bool :: proc(r: ^Reader, key: string) -> (value: bool, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return false, .Not_Parsed
 	}
 
@@ -288,7 +295,7 @@ read_bool :: proc(r: ^Reader, key: string) -> (value: bool, err: Error) {
 
 @(require_results)
 exists :: proc(r: ^Reader, key: string) -> bool {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return false
 	}
 
@@ -298,7 +305,7 @@ exists :: proc(r: ^Reader, key: string) -> bool {
 
 @(require_results)
 is_null :: proc(r: ^Reader, key: string) -> bool {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return false
 	}
 
@@ -308,7 +315,7 @@ is_null :: proc(r: ^Reader, key: string) -> bool {
 
 @(require_results)
 array_len :: proc(r: ^Reader, key: string) -> (int, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 	idx, found := get_idx_by_path_from(&r.parser, r.parser.root, key)
@@ -471,6 +478,46 @@ unescape_string_temp :: proc(s: string) -> string {
 	}
 	buf := make([]byte, len(s), context.temp_allocator)
 	return unescape_to(s, buf)
+}
+
+parse_int_key :: proc(
+	$T: typeid,
+	key: string,
+) -> (
+	value: T,
+	ok: bool,
+) where intrinsics.type_is_integer(T) {
+	digits := key
+	negative := false
+	if len(digits) > 0 && digits[0] == '-' {
+		negative = true
+		digits = digits[1:]
+	}
+	if len(digits) == 0 {
+		return 0, false
+	}
+
+	magnitude: u64
+	for i in 0 ..< len(digits) {
+		c := digits[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		d := u64(c - '0')
+		if magnitude > (max(u64) - d) / 10 {
+			return 0, false
+		}
+		magnitude = magnitude * 10 + d
+	}
+
+	full := i128(magnitude)
+	if negative {
+		full = -full
+	}
+	if full < i128(min(T)) || full > i128(max(T)) {
+		return 0, false
+	}
+	return T(full), true
 }
 
 unescape_to :: proc(s: string, buf: []byte) -> string {
@@ -657,7 +704,7 @@ root_element :: proc(r: ^Reader) -> Element {
 
 @(require_results)
 element_at :: proc(r: ^Reader, path: string) -> (Element, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -675,7 +722,7 @@ element_at :: proc(r: ^Reader, path: string) -> (Element, Error) {
 
 @(require_results)
 array_elements :: proc(r: ^Reader, path: string) -> ([]Element, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return nil, .Not_Parsed
 	}
 
@@ -694,7 +741,7 @@ array_elements :: proc(r: ^Reader, path: string) -> ([]Element, Error) {
 
 @(require_results)
 array_element :: proc(r: ^Reader, path: string, index: int) -> (Element, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -722,7 +769,7 @@ array_element :: proc(r: ^Reader, path: string, index: int) -> (Element, Error) 
 
 @(require_results)
 obj_element :: proc(r: ^Reader, path: string, key: string) -> (Element, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -746,7 +793,7 @@ obj_element :: proc(r: ^Reader, path: string, key: string) -> (Element, Error) {
 
 @(require_results)
 obj_element_from :: proc(r: ^Reader, elem: Element, key: string) -> (Element, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -765,7 +812,7 @@ obj_element_from :: proc(r: ^Reader, elem: Element, key: string) -> (Element, Er
 
 @(require_results)
 array_element_from :: proc(r: ^Reader, elem: Element, index: int) -> (Element, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -788,7 +835,7 @@ array_element_from :: proc(r: ^Reader, elem: Element, index: int) -> (Element, E
 
 @(require_results)
 array_elements_from :: proc(r: ^Reader, elem: Element) -> ([]Element, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return nil, .Not_Parsed
 	}
 
@@ -822,7 +869,7 @@ collect_array_elements :: proc(r: ^Reader, arr_idx: u32, count: u32) -> []Elemen
 
 @(require_results)
 read_string_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: string, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return "", .Not_Parsed
 	}
 
@@ -849,7 +896,7 @@ read_int_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: int, 
 
 @(require_results)
 read_i64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: i64, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -874,7 +921,7 @@ read_i64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: i64, 
 
 @(require_results)
 read_f64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: f64, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -899,7 +946,7 @@ read_f64_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: f64, 
 
 @(require_results)
 read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return false, .Not_Parsed
 	}
 
@@ -926,7 +973,7 @@ read_bool_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: bool
 
 @(require_results)
 read_string_value :: proc(r: ^Reader, elem: Element) -> (value: string, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return "", .Not_Parsed
 	}
 
@@ -949,7 +996,7 @@ read_int_value :: proc(r: ^Reader, elem: Element) -> (value: int, err: Error) {
 
 @(require_results)
 read_i64_value :: proc(r: ^Reader, elem: Element) -> (value: i64, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -970,7 +1017,7 @@ read_i64_value :: proc(r: ^Reader, elem: Element) -> (value: i64, err: Error) {
 
 @(require_results)
 read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return 0, .Not_Parsed
 	}
 
@@ -991,7 +1038,7 @@ read_f64_value :: proc(r: ^Reader, elem: Element) -> (value: f64, err: Error) {
 
 @(require_results)
 read_bool_value :: proc(r: ^Reader, elem: Element) -> (value: bool, err: Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return false, .Not_Parsed
 	}
 
@@ -1014,7 +1061,7 @@ read_bool_value :: proc(r: ^Reader, elem: Element) -> (value: bool, err: Error) 
 
 @(require_results)
 read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return "", .Not_Parsed
 	}
 	idx, found := get_idx_by_path_from(&r.parser, r.parser.root, path)
@@ -1026,7 +1073,7 @@ read_raw :: proc(r: ^Reader, path: string) -> (string, Error) {
 
 @(require_results)
 read_raw_elem :: proc(r: ^Reader, elem: Element, field: string) -> (string, Error) {
-	if r.parser.values == nil {
+	if !reader_ready(r) {
 		return "", .Not_Parsed
 	}
 	idx, found := get_idx_by_path_from(&r.parser, element_index(r, elem), field)

@@ -4,6 +4,7 @@ import "core:mem"
 import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
+import fp "core:path/filepath"
 import "core:strings"
 import "core:testing"
 
@@ -769,7 +770,9 @@ test_parse_fixed_array_with_named_constant :: proc(t: ^testing.T) {
 	alloc := mem.arena_allocator(&arena)
 	context.allocator = alloc
 
+	saved_constants := g_constants
 	g_constants = make(map[string]int, allocator = alloc)
+	defer g_constants = saved_constants
 
 	source :=
 		`package test
@@ -1006,13 +1009,13 @@ test_marshal_integer_cast_types :: proc(t: ^testing.T) {
 	)
 	testing.expect(
 		t,
-		strings.contains(code, "write_int(w, int(value.h))"),
-		"should cast u64 to int",
+		strings.contains(code, "write_u64(w, u64(value.h))"),
+		"should write u64 through the unsigned path",
 	)
 	testing.expect(
 		t,
-		strings.contains(code, "write_int(w, int(value.i))"),
-		"should cast uint to int",
+		strings.contains(code, "write_u64(w, u64(value.i))"),
+		"should write uint through the unsigned path",
 	)
 }
 
@@ -2164,5 +2167,1298 @@ Shape :: union { Circle, Square }
 		t,
 		strings.contains(code, `write_string(w, "square")`),
 		"marshal should emit literal tag for square",
+	)
+}
+
+@(test)
+test_parse_pointer_fields :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 65536))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	source :=
+		`package test
+
+Address :: struct {
+	city: string ` +
+		"`json:\"city\"`" +
+		`,
+}
+
+Person :: struct {
+	home:    ^Address   ` +
+		"`json:\"home\"`" +
+		`,
+	age:     ^int       ` +
+		"`json:\"age\"`" +
+		`,
+	history: []^Address ` +
+		"`json:\"history\"`" +
+		`,
+}
+`
+
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	structs := make([dynamic]Struct_Info, alloc)
+	unions := make([dynamic]Union_Info, alloc)
+	for decl in file.decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			process_value_decl(d, &structs, &unions, alloc)
+		}
+	}
+
+	person_idx := -1
+	for info, i in structs {
+		if info.name == "Person" {
+			person_idx = i
+			break
+		}
+	}
+	testing.expect(t, person_idx >= 0, "should find Person struct")
+
+	person := structs[person_idx]
+	testing.expect_value(t, len(person.fields), 3)
+
+	testing.expect_value(t, person.fields[0].type_kind, Type_Kind.Pointer_Struct)
+	testing.expect_value(t, person.fields[0].element_type, "Address")
+
+	testing.expect_value(t, person.fields[1].type_kind, Type_Kind.Pointer_Primitive)
+	testing.expect_value(t, person.fields[1].element_type, "int")
+
+	testing.expect_value(t, person.fields[2].type_kind, Type_Kind.Unknown)
+}
+
+@(test)
+test_unmarshal_pointer_struct :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Person",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "home",
+			json_name = "home",
+			type_kind = .Pointer_Struct,
+			type_name = "pointer",
+			element_type = "Address",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, `element_value_type(r, ptr_elem) == .Object`),
+		"should only allocate for an object",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "unmarshal_address_elem(r, ptr_elem)"),
+		"should unmarshal the pointed-to value",
+	)
+	testing.expect(t, strings.contains(code, "ptr := new(Address)"), "should allocate the pointed-to value")
+	testing.expect(t, strings.contains(code, "result.home = ptr"), "should assign the pointer")
+}
+
+@(test)
+test_unmarshal_pointer_primitive :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Person",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "age",
+			json_name = "age",
+			type_kind = .Pointer_Primitive,
+			type_name = "pointer",
+			element_type = "int",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, `element_value_type(r, ptr_elem) != .Null`),
+		"should leave null as nil",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "read_int_value(r, ptr_elem)"),
+		"should read the element value",
+	)
+	testing.expect(t, strings.contains(code, "ptr := new(int)"), "should allocate the value")
+	testing.expect(t, strings.contains(code, "ptr^ = val"), "should store the value")
+	testing.expect(t, strings.contains(code, "result.age = ptr"), "should assign the pointer")
+}
+
+@(test)
+test_unmarshal_pointer_primitive_cast :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Person",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "rank",
+			json_name = "rank",
+			type_kind = .Pointer_Primitive,
+			type_name = "pointer",
+			element_type = "i32",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "read_i64_value(r, ptr_elem)"),
+		"should read sized ints as i64",
+	)
+	testing.expect(t, strings.contains(code, "ptr := new(i32)"), "should allocate the sized int")
+	testing.expect(t, strings.contains(code, "ptr^ = i32(val)"), "should cast to the field type")
+}
+
+@(test)
+test_marshal_pointer_writes_null_when_nil :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Person",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "home",
+			json_name = "home",
+			type_kind = .Pointer_Struct,
+			type_name = "pointer",
+			element_type = "Address",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "age",
+			json_name = "age",
+			type_kind = .Pointer_Primitive,
+			type_name = "pointer",
+			element_type = "int",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, `write_key(w, "home")`), "should write the key")
+	testing.expect(t, strings.contains(code, "if value.home != nil {"), "should test for nil")
+	testing.expect(
+		t,
+		strings.contains(code, "marshal_address(w, value.home^)"),
+		"should marshal the pointed-to value",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, value.age^)"),
+		"should write the dereferenced primitive",
+	)
+	testing.expect(t, strings.contains(code, "write_null(w)"), "should write null when nil")
+}
+
+@(test)
+test_marshal_pointer_omitempty_skips_field :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Person",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "home",
+			json_name = "home",
+			type_kind = .Pointer_Struct,
+			type_name = "pointer",
+			element_type = "Address",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "if value.home != nil {"), "should guard on nil")
+	testing.expect(
+		t,
+		!strings.contains(code, "write_null(w)"),
+		"omitempty should skip the field instead of writing null",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "v.home == nil"),
+		"is_zero should treat a nil pointer as zero",
+	)
+}
+
+@(test)
+test_marshal_unknown_field_writes_no_key :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Person",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info{odin_name = "history", json_name = "history", type_kind = .Unknown},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		!strings.contains(code, `write_key(w, "history")`),
+		"a key with no value would be invalid JSON",
+	)
+}
+
+@(test)
+test_unmarshal_clears_tolerated_error :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Config",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "host",
+			json_name = "host",
+			type_kind = .String,
+			type_name = "string",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "\terr = .OK\n\treturn\n"),
+		"a missing field should not leak Key_Not_Found into the returned error",
+	)
+}
+
+@(test)
+test_absolute_dir_of_missing_directory :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 8192))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	missing, missing_ok := absolute_dir("/does/not/exist/gen")
+	testing.expect_value(t, missing, "/does/not/exist/gen")
+	testing.expect_value(t, missing_ok, true)
+
+	dotted, dotted_ok := absolute_dir("/tmp/./gen/")
+	testing.expect_value(t, dotted, "/tmp/gen")
+	testing.expect_value(t, dotted_ok, true)
+
+	relative, relative_ok := absolute_dir("gen")
+	testing.expect_value(t, relative_ok, true)
+	testing.expect(t, fp.is_abs(relative), "a relative dir should resolve to an absolute path")
+	testing.expect(t, strings.has_suffix(relative, "/gen"), "should keep the directory name")
+}
+
+@(test)
+test_parse_map_fields :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 65536))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	source :=
+		`package test
+
+Status :: enum {
+	Idle,
+	Active,
+}
+
+Item :: struct {
+	sku: string ` +
+		"`json:\"sku\"`" +
+		`,
+}
+
+Inventory :: struct {
+	labels:   map[string]string ` +
+		"`json:\"labels\"`" +
+		`,
+	by_id:    map[i64]Item      ` +
+		"`json:\"by_id\"`" +
+		`,
+	by_state: map[Status]int    ` +
+		"`json:\"by_state\"`" +
+		`,
+	by_ratio: map[f64]int       ` +
+		"`json:\"by_ratio\"`" +
+		`,
+	nested:   map[string][]int  ` +
+		"`json:\"nested\"`" +
+		`,
+}
+`
+
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	structs := make([dynamic]Struct_Info, alloc)
+	unions := make([dynamic]Union_Info, alloc)
+	for decl in file.decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			process_value_decl(d, &structs, &unions, alloc)
+		}
+	}
+
+
+	named := Named_Types {
+		enums     = make(map[string]bool, allocator = alloc),
+		distincts = make(map[string]string, allocator = alloc),
+	}
+	collect_named_types(file.decls[:], &named)
+	resolve_named_types(structs[:], named)
+
+	inventory_idx := -1
+	for info, i in structs {
+		if info.name == "Inventory" {
+			inventory_idx = i
+			break
+		}
+	}
+	testing.expect(t, inventory_idx >= 0, "should find Inventory struct")
+
+	fields := structs[inventory_idx].fields
+	testing.expect_value(t, len(fields), 5)
+
+	testing.expect_value(t, fields[0].type_kind, Type_Kind.Map_Primitive)
+	testing.expect_value(t, fields[0].key_type, "string")
+	testing.expect_value(t, fields[0].element_type, "string")
+
+	testing.expect_value(t, fields[1].type_kind, Type_Kind.Map_Struct)
+	testing.expect_value(t, fields[1].key_type, "i64")
+	testing.expect_value(t, fields[1].element_type, "Item")
+
+	testing.expect_value(t, fields[2].type_kind, Type_Kind.Map_Primitive)
+	testing.expect_value(t, fields[2].key_type, "Status")
+
+	testing.expect_value(t, fields[3].type_kind, Type_Kind.Unknown)
+	testing.expect_value(t, fields[4].type_kind, Type_Kind.Unknown)
+}
+
+@(test)
+test_unmarshal_map_string_keys :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Inventory",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "labels",
+			json_name = "labels",
+			type_kind = .Map_Primitive,
+			type_name = "map",
+			element_type = "string",
+			key_type = "string",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "element_value_type(r, map_elem) == .Object"),
+		"should only read an object as a map",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.labels = make(map[string]string)"),
+		"should allocate the map",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "for raw_key, val_elem in next_pair(&it)"),
+		"should iterate members without allocating",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "key := unescape_string(r, raw_key)"),
+		"should decode escapes in keys",
+	)
+	testing.expect(t, strings.contains(code, "result.labels[key] = val"), "should insert the entry")
+	testing.expect(
+		t,
+		!strings.contains(code, `import "core:strconv"`),
+		"string keys should not pull in strconv",
+	)
+}
+
+@(test)
+test_unmarshal_map_integer_keys :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Inventory",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "by_id",
+			json_name = "by_id",
+			type_kind = .Map_Struct,
+			type_name = "map",
+			element_type = "Item",
+			key_type = "i64",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "parse_int_key(i64, key)"),
+		"should parse the key as a range-checked i64",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "if !key_ok do continue"),
+		"should skip a key that is not a number",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "unmarshal_item_elem(r, val_elem)"),
+		"should unmarshal struct values",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.by_id[key_num] = val"),
+		"should key the map on the parsed value",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "element_value_type(r, val_elem) != .Object do continue"),
+		"should skip entries whose value is not an object",
+	)
+}
+
+@(test)
+test_unmarshal_map_enum_keys :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Inventory",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "by_state",
+			json_name = "by_state",
+			type_kind = .Map_Primitive,
+			type_name = "map",
+			element_type = "int",
+			key_type = "Status",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "result.by_state = make(map[Status]int)"),
+		"should allocate an enum keyed map",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.by_state[Status(key_num)] = val"),
+		"should cast the key to the enum",
+	)
+}
+
+@(test)
+test_marshal_map :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Inventory",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "labels",
+			json_name = "labels",
+			type_kind = .Map_Primitive,
+			type_name = "map",
+			element_type = "string",
+			key_type = "string",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "by_id",
+			json_name = "by_id",
+			type_kind = .Map_Struct,
+			type_name = "map",
+			element_type = "Item",
+			key_type = "i64",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, `write_key(w, "labels")`), "should write the field key")
+	testing.expect(
+		t,
+		strings.contains(code, "for key, item in value.labels {"),
+		"should iterate the map",
+	)
+	testing.expect(t, strings.contains(code, "write_key(w, key)"), "should write a string key")
+	testing.expect(t, strings.contains(code, "write_string(w, item)"), "should write the value")
+	testing.expect(
+		t,
+		strings.contains(code, "write_key_i64(w, i64(key))"),
+		"should write an integer key as its decimal text",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "marshal_item(w, item)"),
+		"should marshal struct values",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "len(v.labels) == 0"),
+		"is_zero should treat an empty map as zero",
+	)
+}
+
+@(test)
+test_marshal_map_omitempty :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Inventory",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "labels",
+			json_name = "labels",
+			type_kind = .Map_Primitive,
+			type_name = "map",
+			element_type = "string",
+			key_type = "string",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "if len(value.labels) > 0 {"),
+		"omitempty should skip an empty map",
+	)
+}
+
+@(test)
+test_parse_enum_and_distinct_types :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 65536))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	source :=
+		`package test
+
+Status :: enum {
+	Idle,
+	Active,
+}
+
+Entity_ID :: distinct int
+User_Name :: distinct string
+Coords :: distinct [2]int
+
+Record :: struct {
+	state:   Status    ` +
+		"`json:\"state\"`" +
+		`,
+	id:      Entity_ID ` +
+		"`json:\"id\"`" +
+		`,
+	name:    User_Name ` +
+		"`json:\"name\"`" +
+		`,
+	history: []Status  ` +
+		"`json:\"history\"`" +
+		`,
+	spot:    Coords    ` +
+		"`json:\"spot\"`" +
+		`,
+}
+`
+
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	structs := make([dynamic]Struct_Info, alloc)
+	unions := make([dynamic]Union_Info, alloc)
+	for decl in file.decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			process_value_decl(d, &structs, &unions, alloc)
+		}
+	}
+
+
+	named := Named_Types {
+		enums     = make(map[string]bool, allocator = alloc),
+		distincts = make(map[string]string, allocator = alloc),
+	}
+	collect_named_types(file.decls[:], &named)
+	resolve_named_types(structs[:], named)
+
+	testing.expect_value(t, len(structs), 1)
+	fields := structs[0].fields
+	testing.expect_value(t, len(fields), 5)
+
+	testing.expect_value(t, fields[0].type_kind, Type_Kind.Enum)
+
+	testing.expect_value(t, fields[1].type_kind, Type_Kind.Distinct)
+	testing.expect_value(t, fields[1].base_type, "int")
+
+	testing.expect_value(t, fields[2].type_kind, Type_Kind.Distinct)
+	testing.expect_value(t, fields[2].base_type, "string")
+
+	testing.expect_value(t, fields[3].type_kind, Type_Kind.Array_Primitive)
+	testing.expect_value(t, fields[3].element_type, "Status")
+
+	testing.expect_value(t, fields[4].type_kind, Type_Kind.Unknown)
+}
+
+@(test)
+test_unmarshal_enum_in_container :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Task",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "history",
+			json_name = "history",
+			type_kind = .Array_Primitive,
+			type_name = "slice",
+			element_type = "Status",
+			element_kind = .Enum,
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "tally",
+			json_name = "tally",
+			type_kind = .Map_Primitive,
+			type_name = "map",
+			element_type = "Status",
+			key_type = "string",
+			element_kind = .Enum,
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "result.history = make([]Status, len(items))"),
+		"should allocate a slice of the enum",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.history[i] = Status(val)"),
+		"should cast slice elements to the enum",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.tally[key] = Status(val)"),
+		"should cast map values to the enum",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_int(w, int(item))"),
+		"should write enum elements as their integer value",
+	)
+}
+
+@(test)
+test_distinct_string_field :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Record",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "name",
+			json_name = "name",
+			type_kind = .Distinct,
+			type_name = "User_Name",
+			base_type = "string",
+			omitempty = true,
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(t, strings.contains(code, "val: string"), "should read into the base type")
+	testing.expect(
+		t,
+		strings.contains(code, `read_string_elem(r, elem, "name")`),
+		"should read a distinct string as a string",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.name = User_Name(val)"),
+		"should cast to the distinct type",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_string(w, string(value.name))"),
+		"should write a distinct string as a string",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, `string(value.name) != ""`),
+		"omitempty should compare against the base type zero value",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, `string(v.name) == ""`),
+		"is_zero should compare against the base type zero value",
+	)
+}
+
+@(test)
+test_distinct_numeric_bases :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Record",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "big",
+			json_name = "big",
+			type_kind = .Distinct,
+			type_name = "Big_ID",
+			base_type = "i64",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "ratio",
+			json_name = "ratio",
+			type_kind = .Distinct,
+			type_name = "Ratio",
+			base_type = "f64",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "active",
+			json_name = "active",
+			type_kind = .Distinct,
+			type_name = "Flag",
+			base_type = "bool",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, `read_i64_elem(r, elem, "big")`),
+		"a wide integer base should not lose precision through int",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, `read_f64_elem(r, elem, "ratio")`),
+		"a float base should read as a float",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, `read_bool_elem(r, elem, "active")`),
+		"a bool base should read as a bool",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_f64(w, f64(value.ratio))"),
+		"should write a distinct float as a float",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_bool(w, bool(value.active))"),
+		"should write a distinct bool as a bool",
+	)
+}
+
+@(test)
+test_unmarshal_map_unsigned_keys :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Wide",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "by_u64",
+			json_name = "by_u64",
+			type_kind = .Map_Primitive,
+			type_name = "map",
+			element_type = "int",
+			key_type = "u64",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "parse_int_key(u64, key)"),
+		"should parse the key as a range-checked u64",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_key_u64(w, u64(key))"),
+		"should write an unsigned key through the u64 path",
+	)
+	testing.expect(
+		t,
+		!strings.contains(code, "strconv"),
+		"generated code should not need strconv",
+	)
+}
+
+@(test)
+test_skipped_field_warnings :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 16384))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	person := Struct_Info {
+		name   = "Person",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&person.fields,
+		Field_Info{odin_name = "name", json_name = "name", type_kind = .String},
+	)
+	append(
+		&person.fields,
+		Field_Info{odin_name = "history", json_name = "history", type_kind = .Unknown, type_text = "[][]int"},
+	)
+
+	pair := Struct_Info {
+		name     = "Pair",
+		is_tuple = true,
+		fields   = make([dynamic]Field_Info, alloc),
+	}
+	append(&pair.fields, Field_Info{odin_name = "x", type_kind = .Int, type_text = "int"})
+	append(
+		&pair.fields,
+		Field_Info{odin_name = "addr", type_kind = .Struct, type_name = "Address", type_text = "Address"},
+	)
+
+	warnings := skipped_field_warnings({person, pair}, alloc)
+
+	testing.expect_value(t, len(warnings), 2)
+	testing.expect_value(t, warnings[0], "Person.history skipped: [][]int is not supported")
+	testing.expect_value(t, warnings[1], "Pair.addr skipped: Address is not supported in a tuple struct")
+}
+
+@(test)
+test_collect_multi_name_declarations :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 65536))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	source := `package test
+
+First_ID, Second_ID :: distinct int, distinct i64
+`
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	named := Named_Types {
+		enums     = make(map[string]bool, allocator = alloc),
+		distincts = make(map[string]string, allocator = alloc),
+	}
+	collect_named_types(file.decls[:], &named)
+
+	testing.expect_value(t, named.distincts["First_ID"], "int")
+	testing.expect_value(t, named.distincts["Second_ID"], "i64")
+}
+
+@(test)
+test_parse_captures_type_text :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 65536))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	source := `package test
+
+Person :: struct {
+	name:    string  ` + "`json:\"name\"`" + `,
+	history: [][]int ` + "`json:\"history\"`" + `,
+}
+`
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	structs := make([dynamic]Struct_Info, alloc)
+	for decl in file.decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			unions := make([dynamic]Union_Info, alloc)
+			process_value_decl(d, &structs, &unions, alloc, file.src)
+		}
+	}
+
+	testing.expect_value(t, len(structs), 1)
+	testing.expect_value(t, len(structs[0].fields), 2)
+	testing.expect_value(t, structs[0].fields[0].type_text, "string")
+	testing.expect_value(t, structs[0].fields[1].type_kind, Type_Kind.Unknown)
+	testing.expect_value(t, structs[0].fields[1].type_text, "[][]int")
+}
+
+@(test)
+test_parse_distinct_in_containers :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 65536))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	source := `package test
+
+Entity_ID :: distinct int
+User_Name :: distinct string
+Coords :: distinct [2]int
+
+Roster :: struct {
+	ids:    []Entity_ID          ` + "`json:\"ids\"`" + `,
+	queue:  [dynamic]Entity_ID   ` + "`json:\"queue\"`" + `,
+	slots:  [4]Entity_ID         ` + "`json:\"slots\"`" + `,
+	owner:  ^User_Name           ` + "`json:\"owner\"`" + `,
+	names:  map[string]User_Name ` + "`json:\"names\"`" + `,
+	shapes: []Coords             ` + "`json:\"shapes\"`" + `,
+}
+`
+
+	NO_POS :: tokenizer.Pos{}
+	file := ast.new(ast.File, NO_POS, NO_POS)
+	file.src = source
+	file.fullpath = "test.odin"
+
+	p := parser.default_parser()
+	p.err = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+	p.warn = proc(_: tokenizer.Pos, _: string, _: ..any) {}
+
+	ok := parser.parse_file(&p, file)
+	testing.expect(t, ok, "should parse source")
+
+	structs := make([dynamic]Struct_Info, alloc)
+	unions := make([dynamic]Union_Info, alloc)
+	for decl in file.decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			process_value_decl(d, &structs, &unions, alloc)
+		}
+	}
+
+	named := Named_Types {
+		enums     = make(map[string]bool, allocator = alloc),
+		distincts = make(map[string]string, allocator = alloc),
+	}
+	collect_named_types(file.decls[:], &named)
+	resolve_named_types(structs[:], named)
+
+	testing.expect_value(t, len(structs), 1)
+	fields := structs[0].fields
+	testing.expect_value(t, len(fields), 6)
+
+	testing.expect_value(t, fields[0].type_kind, Type_Kind.Array_Primitive)
+	testing.expect_value(t, fields[0].element_kind, Element_Kind.Distinct)
+	testing.expect_value(t, fields[0].base_type, "int")
+
+	testing.expect_value(t, fields[1].type_kind, Type_Kind.Dynamic_Primitive)
+	testing.expect_value(t, fields[1].element_kind, Element_Kind.Distinct)
+
+	testing.expect_value(t, fields[2].type_kind, Type_Kind.Fixed_Array_Primitive)
+	testing.expect_value(t, fields[2].element_kind, Element_Kind.Distinct)
+
+	testing.expect_value(t, fields[3].type_kind, Type_Kind.Pointer_Primitive)
+	testing.expect_value(t, fields[3].element_kind, Element_Kind.Distinct)
+	testing.expect_value(t, fields[3].base_type, "string")
+
+	testing.expect_value(t, fields[4].type_kind, Type_Kind.Map_Primitive)
+	testing.expect_value(t, fields[4].element_kind, Element_Kind.Distinct)
+	testing.expect_value(t, fields[4].base_type, "string")
+
+	testing.expect_value(t, fields[5].type_kind, Type_Kind.Unknown)
+}
+
+@(test)
+test_unmarshal_distinct_in_containers :: proc(t: ^testing.T) {
+	arena: mem.Arena
+	mem.arena_init(&arena, make([]byte, 32768))
+	defer delete(arena.data)
+	alloc := mem.arena_allocator(&arena)
+	context.allocator = alloc
+
+	info := Struct_Info {
+		name   = "Roster",
+		fields = make([dynamic]Field_Info, alloc),
+	}
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "ids",
+			json_name = "ids",
+			type_kind = .Array_Primitive,
+			type_name = "array",
+			element_type = "Entity_ID",
+			element_kind = .Distinct,
+			base_type = "int",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "names",
+			json_name = "names",
+			type_kind = .Map_Primitive,
+			type_name = "map",
+			element_type = "User_Name",
+			element_kind = .Distinct,
+			base_type = "string",
+			key_type = "string",
+		},
+	)
+	append(
+		&info.fields,
+		Field_Info {
+			odin_name = "owner",
+			json_name = "owner",
+			type_kind = .Pointer_Primitive,
+			type_name = "pointer",
+			element_type = "User_Name",
+			element_kind = .Distinct,
+			base_type = "string",
+		},
+	)
+
+	code := generate_code({info}, nil, "json", "", "", alloc)
+
+	testing.expect(
+		t,
+		strings.contains(code, "result.ids = make([]Entity_ID, len(items))"),
+		"should allocate a slice of the distinct type",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.ids[i] = Entity_ID(val)"),
+		"should cast the element to the distinct type",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.names = make(map[string]User_Name)"),
+		"should allocate a map of the distinct type",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "result.names[key] = User_Name(val)"),
+		"should cast the map value to the distinct type",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "write_string(w, string(item))"),
+		"should write the map value as its base type",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "ptr := new(User_Name)"),
+		"should allocate the distinct pointee",
+	)
+	testing.expect(
+		t,
+		strings.contains(code, "ptr^ = User_Name(val)"),
+		"should cast the pointee to the distinct type",
 	)
 }

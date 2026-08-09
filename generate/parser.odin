@@ -77,7 +77,7 @@ parse_file :: proc(
 	for decl in file.decls {
 		#partial switch d in decl.derived {
 		case ^ast.Value_Decl:
-			process_value_decl(d, &structs, &unions, allocator)
+			process_value_decl(d, &structs, &unions, allocator, file.src)
 		}
 	}
 
@@ -89,6 +89,7 @@ process_value_decl :: proc(
 	structs: ^[dynamic]Struct_Info,
 	unions: ^[dynamic]Union_Info,
 	allocator := context.allocator,
+	src := "",
 ) {
 	if len(decl.names) == 0 || len(decl.values) == 0 {
 		return
@@ -100,7 +101,7 @@ process_value_decl :: proc(
 		value_node := decl.values[0]
 		#partial switch v in value_node.derived {
 		case ^ast.Struct_Type:
-			struct_info := extract_struct_info(n.name, v, allocator)
+			struct_info := extract_struct_info(n.name, v, allocator, src)
 			if struct_info != nil && len(struct_info.fields) > 0 && !struct_info.is_tuple {
 				append(structs, struct_info^)
 			}
@@ -226,10 +227,80 @@ resolve_unions :: proc(
 	delete(resolved)
 }
 
+resolve_named_types :: proc(structs: []Struct_Info, named: Named_Types) {
+	for &s in structs {
+		for &f in s.fields {
+			element_supported := true
+			if f.element_type in named.enums {
+				f.element_kind = .Enum
+			} else if base, is_distinct := named.distincts[f.element_type]; is_distinct {
+				if is_primitive_type_name(base) {
+					f.element_kind = .Distinct
+					f.base_type = base
+				} else {
+					element_supported = false
+				}
+			}
+
+			#partial switch f.type_kind {
+			case .Struct:
+				if f.type_name in named.enums {
+					f.type_kind = .Enum
+				} else if base, is_distinct := named.distincts[f.type_name]; is_distinct {
+					f.type_kind = is_primitive_type_name(base) ? .Distinct : .Unknown
+					f.base_type = base
+				}
+			case .Array_Struct:
+				if !element_supported {
+					f.type_kind = .Unknown
+				} else if f.element_kind != .None {
+					f.type_kind = .Array_Primitive
+				}
+			case .Dynamic_Struct:
+				if !element_supported {
+					f.type_kind = .Unknown
+				} else if f.element_kind != .None {
+					f.type_kind = .Dynamic_Primitive
+				}
+			case .Fixed_Array_Struct:
+				if !element_supported {
+					f.type_kind = .Unknown
+				} else if f.element_kind != .None {
+					f.type_kind = .Fixed_Array_Primitive
+				}
+			case .Pointer_Struct:
+				if !element_supported {
+					f.type_kind = .Unknown
+				} else if f.element_kind != .None {
+					f.type_kind = .Pointer_Primitive
+				}
+			case .Map_Struct:
+				if !element_supported {
+					f.type_kind = .Unknown
+				} else if f.element_kind != .None {
+					f.type_kind = .Map_Primitive
+				}
+			}
+
+			#partial switch f.type_kind {
+			case .Map_Primitive, .Map_Struct:
+				if !is_map_key_type(f.key_type, named) {
+					f.type_kind = .Unknown
+				}
+			}
+		}
+	}
+}
+
+is_map_key_type :: proc(key_type: string, named: Named_Types) -> bool {
+	return key_type == "string" || is_integer_type(key_type) || key_type in named.enums
+}
+
 extract_struct_info :: proc(
 	name: string,
 	struct_type: ^ast.Struct_Type,
 	allocator := context.allocator,
+	src := "",
 ) -> ^Struct_Info {
 	info := new(Struct_Info, allocator)
 	info.name = strings.clone(name, allocator)
@@ -242,7 +313,7 @@ extract_struct_info :: proc(
 
 	has_any_json_tag := false
 	for field in struct_type.fields.list {
-		process_field(field, &info.fields, &has_any_json_tag, allocator)
+		process_field(field, &info.fields, &has_any_json_tag, allocator, src)
 	}
 
 	if !has_any_json_tag && len(info.fields) > 0 {
@@ -257,6 +328,7 @@ process_field :: proc(
 	fields: ^[dynamic]Field_Info,
 	has_any_json_tag: ^bool,
 	allocator := context.allocator,
+	src := "",
 ) {
 	json_name, omitempty, raw, union_tag, has_tag := parse_json_tag(field.tag, allocator)
 	if has_tag {
@@ -277,6 +349,19 @@ process_field :: proc(
 			field_info.union_tag = union_tag
 			field_info.type_kind, field_info.type_name, field_info.element_type, field_info.array_size =
 				determine_type_kind(field.type, allocator)
+
+			if field.type != nil {
+				#partial switch map_type in field.type.derived {
+				case ^ast.Map_Type:
+					field_info.key_type, _ = map_key_type(map_type.key, allocator)
+				}
+
+				start := field.type.pos.offset
+				end := field.type.end.offset
+				if src != "" && start >= 0 && end > start && end <= len(src) {
+					field_info.type_text = src[start:end]
+				}
+			}
 
 			append(fields, field_info)
 		}
@@ -391,6 +476,10 @@ determine_type_kind :: proc(
 		elem_kind, elem_name, _, _ := determine_type_kind(t.elem, allocator)
 		element_type = elem_name
 
+		if elem_kind != .Struct && !is_primitive_kind(elem_kind) {
+			return .Unknown, "", "", 0
+		}
+
 		if t.len != nil {
 			size := parse_array_length(t.len)
 			if elem_kind == .Struct {
@@ -410,6 +499,10 @@ determine_type_kind :: proc(
 		elem_kind, elem_name, _, _ := determine_type_kind(t.elem, allocator)
 		element_type = elem_name
 
+		if elem_kind != .Struct && !is_primitive_kind(elem_kind) {
+			return .Unknown, "", "", 0
+		}
+
 		if elem_kind == .Struct {
 			return .Dynamic_Struct, "dynamic", elem_name, 0
 		} else {
@@ -417,7 +510,31 @@ determine_type_kind :: proc(
 		}
 
 	case ^ast.Pointer_Type:
-		return determine_type_kind(t.elem, allocator)
+		elem_kind, elem_name, _, _ := determine_type_kind(t.elem, allocator)
+
+		if elem_kind == .Struct {
+			return .Pointer_Struct, "pointer", elem_name, 0
+		}
+		if is_primitive_kind(elem_kind) {
+			return .Pointer_Primitive, "pointer", elem_name, 0
+		}
+		return .Unknown, "", "", 0
+
+	case ^ast.Map_Type:
+		_, key_ok := map_key_type(t.key, allocator)
+		if !key_ok {
+			return .Unknown, "", "", 0
+		}
+
+		value_kind, value_name, _, _ := determine_type_kind(t.value, allocator)
+
+		if value_kind == .Struct {
+			return .Map_Struct, "map", value_name, 0
+		}
+		if is_primitive_kind(value_kind) {
+			return .Map_Primitive, "map", value_name, 0
+		}
+		return .Unknown, "", "", 0
 
 	case ^ast.Selector_Expr:
 		type_name = expr_to_string(type_expr, allocator)
@@ -427,9 +544,41 @@ determine_type_kind :: proc(
 	return .Unknown, "", "", 0
 }
 
+map_key_type :: proc(
+	key_expr: ^ast.Expr,
+	allocator := context.allocator,
+) -> (
+	key_type: string,
+	ok: bool,
+) {
+	kind, name, _, _ := determine_type_kind(key_expr, allocator)
+
+	#partial switch kind {
+	case .String, .Int, .I64, .I8, .I16, .I32, .U8, .U16, .U32, .U64, .Uint, .Struct:
+		return name, true
+	}
+	return "", false
+}
+
+is_primitive_type_name :: proc(name: string) -> bool {
+	return name == "string" || name == "bool" || is_integer_type(name) || is_float_type(name)
+}
+
+is_primitive_kind :: proc(kind: Type_Kind) -> bool {
+	#partial switch kind {
+	case .String, .Int, .I64, .F64, .Bool, .I8, .I16, .I32, .U8, .U16, .U32, .U64, .Uint, .F16, .F32:
+		return true
+	}
+	return false
+}
+
 g_constants: map[string]int
 
-collect_file_constants :: proc(file_path: string, allocator := context.allocator) -> bool {
+collect_file_declarations :: proc(
+	file_path: string,
+	named: ^Named_Types,
+	allocator := context.allocator,
+) -> bool {
 	data, read_err := os.read_entire_file(file_path, allocator)
 	if read_err != nil {
 		return false
@@ -449,7 +598,44 @@ collect_file_constants :: proc(file_path: string, allocator := context.allocator
 	}
 
 	collect_constants(file.decls[:])
+	collect_named_types(file.decls[:], named)
 	return true
+}
+
+collect_named_types :: proc(decls: []^ast.Stmt, named: ^Named_Types) {
+	for decl in decls {
+		#partial switch d in decl.derived {
+		case ^ast.Value_Decl:
+			if d.is_mutable {
+				continue
+			}
+			for name_node, i in d.names {
+				if i >= len(d.values) {
+					break
+				}
+				#partial switch n in name_node.derived {
+				case ^ast.Ident:
+					#partial switch v in d.values[i].derived {
+					case ^ast.Enum_Type:
+						named.enums[n.name] = true
+					case ^ast.Distinct_Type:
+						named.distincts[n.name] = distinct_base_name(v.type)
+					}
+				}
+			}
+		}
+	}
+}
+
+distinct_base_name :: proc(type_expr: ^ast.Expr) -> string {
+	if type_expr == nil {
+		return ""
+	}
+	#partial switch t in type_expr.derived {
+	case ^ast.Ident:
+		return t.name
+	}
+	return ""
 }
 
 collect_constants :: proc(decls: []^ast.Stmt) {
@@ -538,7 +724,6 @@ type_from_ident :: proc(
 	case "bool":
 		return .Bool, type_name, ""
 	case:
-		// Could be enum or distinct, but we'll treat as struct for now
 		return .Struct, type_name, ""
 	}
 }
