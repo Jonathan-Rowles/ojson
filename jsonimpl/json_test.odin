@@ -1159,3 +1159,321 @@ test_writer_u64_and_int_keys :: proc(t: ^testing.T) {
 	expected := `{"18446744073709551615":18446744073709551615,"-9223372036854775808":-9223372036854775808,"0":0}`
 	testing.expect_value(t, writer_string(&w), expected)
 }
+
+@(test)
+test_read_raw_string_spans :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	input := `{"plain":"abc","empty":"","escaped":"a\"b\\c","unicode":"\u00e9\ud83d\ude00","nested":{"inner":"x\ty"}}`
+	testing.expect_value(t, parse(&r, transmute([]byte)input), Error.OK)
+
+	plain, plain_err := read_raw(&r, "plain")
+	testing.expect_value(t, plain_err, Error.OK)
+	testing.expect_value(t, plain, `"abc"`)
+
+	empty, empty_err := read_raw(&r, "empty")
+	testing.expect_value(t, empty_err, Error.OK)
+	testing.expect_value(t, empty, `""`)
+
+	escaped, escaped_err := read_raw(&r, "escaped")
+	testing.expect_value(t, escaped_err, Error.OK)
+	testing.expect_value(t, escaped, `"a\"b\\c"`)
+
+	unicode, unicode_err := read_raw(&r, "unicode")
+	testing.expect_value(t, unicode_err, Error.OK)
+	testing.expect_value(t, unicode, `"\u00e9\ud83d\ude00"`)
+
+	nested, nested_err := element_at(&r, "nested")
+	testing.expect_value(t, nested_err, Error.OK)
+
+	inner, inner_err := read_raw_elem(&r, nested, "inner")
+	testing.expect_value(t, inner_err, Error.OK)
+	testing.expect_value(t, inner, `"x\ty"`)
+}
+
+@(test)
+test_extract_raw_string_matches_scan :: proc(t: ^testing.T) {
+	docs := []string {
+		`{"a":"abc","b":"","c":"a\"b","d":"\u00e9\ud83d\ude00","e":["x","y\\z"],"f":{"g":"h"}}`,
+		`["","\\","\"","\/","\u0000","tail"]`,
+		`{"n":1,"t":true,"f":false,"z":null,"s":"end"}`,
+		`{"deep":{"list":[{"s":"one\n"},{"s":"two"}]},"last":"z"}`,
+	}
+
+	for doc in docs {
+		r: Reader
+		init_reader(&r)
+		defer destroy_reader(&r)
+
+		testing.expect_value(t, parse(&r, transmute([]byte)doc), Error.OK)
+
+		strings_seen := 0
+		for idx in 0 ..< r.parser.values_len {
+			val := r.parser.values[idx]
+			#partial switch val.type {
+			case .String, .Raw_String:
+			case:
+				continue
+			}
+			strings_seen += 1
+
+			raw, err := extract_raw_value(&r.parser, idx)
+			testing.expect_value(t, err, Error.OK)
+
+			end := scan_string_end(doc, int(val.input_pos))
+			testing.expect(t, end >= 0, "the scanning oracle must find the closing quote")
+			testing.expect_value(t, raw, doc[int(val.input_pos):end])
+		}
+		testing.expect(t, strings_seen > 0, "every document here holds strings")
+	}
+}
+
+@(test)
+test_read_string_prefix_shapes :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	input := `{"items":[{"content":"hello world"}],"top":"hello\tworld"}`
+	testing.expect_value(t, parse(&r, transmute([]byte)input), Error.OK)
+
+	by_path, path_err := read_string_prefix(&r, "top", 6)
+	testing.expect_value(t, path_err, Error.OK)
+	testing.expect_value(t, by_path, "hello\t")
+
+	item, item_err := array_element(&r, "items", 0)
+	testing.expect_value(t, item_err, Error.OK)
+
+	by_field, field_err := read_string_prefix_elem(&r, item, "content", 5)
+	testing.expect_value(t, field_err, Error.OK)
+	testing.expect_value(t, by_field, "hello")
+
+	content, content_err := obj_element_from(&r, item, "content")
+	testing.expect_value(t, content_err, Error.OK)
+
+	by_value, value_err := read_string_prefix_value(&r, content, 5)
+	testing.expect_value(t, value_err, Error.OK)
+	testing.expect_value(t, by_value, "hello")
+}
+
+@(test)
+test_read_string_prefix_limits :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	testing.expect_value(t, parse(&r, transmute([]byte)string(`{"v":"abcdef","e":"a\nb"}`)), Error.OK)
+
+	Case :: struct {
+		key:      string,
+		limit:    int,
+		expected: string,
+	}
+
+	cases := []Case {
+		{"v", 0, ""},
+		{"v", -1, ""},
+		{"v", 1, "a"},
+		{"v", 5, "abcde"},
+		{"v", 6, "abcdef"},
+		{"v", 7, "abcdef"},
+		{"v", 1000, "abcdef"},
+		{"e", 0, ""},
+		{"e", 1, "a"},
+		{"e", 2, "a\n"},
+		{"e", 3, "a\nb"},
+		{"e", 4, "a\nb"},
+	}
+
+	for c in cases {
+		value, err := read_string_prefix(&r, c.key, c.limit)
+		testing.expect_value(t, err, Error.OK)
+		testing.expect_value(t, value, c.expected)
+	}
+}
+
+@(test)
+test_read_string_prefix_escape_edges :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	input := `{"at_escape":"ab\ncd","euro":"\u20ac","pair":"\ud83d\ude00","split_pair":"ab\ud83d\ude00"}`
+	testing.expect_value(t, parse(&r, transmute([]byte)input), Error.OK)
+
+	at_escape, at_escape_err := read_string_prefix(&r, "at_escape", 2)
+	testing.expect_value(t, at_escape_err, Error.OK)
+	testing.expect_value(t, at_escape, "ab")
+
+	past_escape, past_escape_err := read_string_prefix(&r, "at_escape", 3)
+	testing.expect_value(t, past_escape_err, Error.OK)
+	testing.expect_value(t, past_escape, "ab\n")
+
+	euro_full, euro_full_err := read_string_prefix(&r, "euro", 3)
+	testing.expect_value(t, euro_full_err, Error.OK)
+	testing.expect_value(t, euro_full, "\u20ac")
+
+	euro_head, euro_head_err := read_string_prefix(&r, "euro", 2)
+	testing.expect_value(t, euro_head_err, Error.OK)
+	testing.expect_value(t, len(euro_head), 2)
+	testing.expect_value(t, euro_head[0], byte(0xE2))
+	testing.expect_value(t, euro_head[1], byte(0x82))
+
+	pair_full, pair_full_err := read_string_prefix(&r, "pair", 4)
+	testing.expect_value(t, pair_full_err, Error.OK)
+	testing.expect_value(t, pair_full, "\U0001F600")
+
+	pair_head, pair_head_err := read_string_prefix(&r, "pair", 3)
+	testing.expect_value(t, pair_head_err, Error.OK)
+	testing.expect_value(t, len(pair_head), 3)
+	testing.expect_value(t, pair_head[0], byte(0xF0))
+	testing.expect_value(t, pair_head[2], byte(0x98))
+
+	split_pair, split_pair_err := read_string_prefix(&r, "split_pair", 3)
+	testing.expect_value(t, split_pair_err, Error.OK)
+	testing.expect_value(t, len(split_pair), 3)
+	testing.expect_value(t, split_pair[:2], "ab")
+	testing.expect_value(t, split_pair[2], byte(0xF0))
+}
+
+@(test)
+test_read_string_prefix_matches_read_string :: proc(t: ^testing.T) {
+	values := []string {
+		`abc`,
+		``,
+		`a\nb`,
+		`\n\n\n\n`,
+		`\u00e9`,
+		`\u20ac`,
+		`\ud83d\ude00`,
+		`x\ud83d\ude00y`,
+		`a\\b`,
+		`a\"b`,
+		`\/`,
+		`head\u0041\ud83d\ude00tail\n`,
+		`0123456789012345678901234567890123456789\tend`,
+		`\ud83d plain lead surrogate`,
+	}
+
+	for v in values {
+		r: Reader
+		init_reader(&r)
+		defer destroy_reader(&r)
+
+		doc := strings.concatenate({`{"v":"`, v, `"}`})
+		defer delete(doc)
+
+		testing.expect_value(t, parse(&r, transmute([]byte)doc), Error.OK)
+
+		full, full_err := read_string(&r, "v")
+		testing.expect_value(t, full_err, Error.OK)
+
+		for limit in 0 ..= len(full) + 4 {
+			prefix, prefix_err := read_string_prefix(&r, "v", limit)
+			testing.expect_value(t, prefix_err, Error.OK)
+			testing.expect_value(t, prefix, full[:min(limit, len(full))])
+		}
+	}
+}
+
+points_into :: proc(s: string, data: []byte) -> bool {
+	if len(s) == 0 || len(data) == 0 {
+		return false
+	}
+	base := uintptr(raw_data(data))
+	return uintptr(raw_data(s)) >= base && uintptr(raw_data(s)) < base + uintptr(len(data))
+}
+
+@(test)
+test_read_string_prefix_does_not_copy :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	data := transmute([]byte)string(`{"plain":"abcdefghij","late":"abcdefghij\nx"}`)
+	testing.expect_value(t, parse(&r, data), Error.OK)
+
+	plain, plain_err := read_string_prefix(&r, "plain", 4)
+	testing.expect_value(t, plain_err, Error.OK)
+	testing.expect_value(t, plain, "abcd")
+	testing.expect(t, points_into(plain, data), "an unescaped value is a view into the input")
+
+	late, late_err := read_string_prefix(&r, "late", 4)
+	testing.expect_value(t, late_err, Error.OK)
+	testing.expect_value(t, late, "abcd")
+	testing.expect(t, points_into(late, data), "a prefix that stops before the first escape is a view too")
+
+	copied, copied_err := read_string_prefix(&r, "late", 11)
+	testing.expect_value(t, copied_err, Error.OK)
+	testing.expect_value(t, copied, "abcdefghij\n")
+	testing.expect(t, !points_into(copied, data), "a prefix that spans an escape is materialised")
+}
+
+@(test)
+test_read_string_prefix_rejects_other_types :: proc(t: ^testing.T) {
+	r: Reader
+	init_reader(&r)
+	defer destroy_reader(&r)
+
+	empty: Reader
+	init_reader(&empty)
+	defer destroy_reader(&empty)
+
+	_, unparsed_err := read_string_prefix(&empty, "v", 8)
+	testing.expect_value(t, unparsed_err, Error.Not_Parsed)
+
+	testing.expect_value(t, parse(&r, transmute([]byte)string(`{"n":42,"o":{"k":1},"a":[1]}`)), Error.OK)
+
+	_, missing_err := read_string_prefix(&r, "nope", 8)
+	testing.expect_value(t, missing_err, Error.Key_Not_Found)
+
+	_, number_err := read_string_prefix(&r, "n", 8)
+	testing.expect_value(t, number_err, Error.Type_Mismatch)
+
+	_, object_err := read_string_prefix(&r, "o", 8)
+	testing.expect_value(t, object_err, Error.Type_Mismatch)
+
+	_, array_err := read_string_prefix(&r, "a", 8)
+	testing.expect_value(t, array_err, Error.Type_Mismatch)
+}
+
+@(test)
+test_unescape_to_respects_buffer_bound :: proc(t: ^testing.T) {
+	GUARD :: byte(0xAA)
+
+	inputs := []string {
+		`abc`,
+		`a\nb`,
+		`\u20ac`,
+		`\ud83d\ude00`,
+		`ab\ud83d\ude00cd`,
+		`a\q b`,
+		`a\u`,
+		`a\uZZZZb`,
+		`\\\\\\`,
+		`x\/y\"z`,
+		`\ud83dtail`,
+		`lead\ud83d\u0041`,
+	}
+
+	for input in inputs {
+		reference: [64]byte
+		full := unescape_to(input, reference[:])
+
+		for limit in 0 ..= len(input) + 2 {
+			guarded: [64]byte
+			for i in 0 ..< len(guarded) {
+				guarded[i] = GUARD
+			}
+
+			out := unescape_to(input, guarded[:limit])
+			testing.expect_value(t, out, full[:min(limit, len(full))])
+
+			for i in limit ..< len(guarded) {
+				testing.expect_value(t, guarded[i], GUARD)
+			}
+		}
+	}
+}

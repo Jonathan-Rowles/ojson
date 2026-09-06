@@ -217,6 +217,23 @@ read_string :: proc(r: ^Reader, key: string) -> (value: string, err: Error) {
 }
 
 @(require_results)
+read_string_prefix :: proc(r: ^Reader, key: string, limit: int) -> (value: string, err: Error) {
+	if !reader_ready(r) {
+		return "", .Not_Parsed
+	}
+
+	val, found := get_by_path_from(&r.parser, r.parser.root, key)
+	if !found {
+		return "", .Key_Not_Found
+	}
+	#partial switch val.type {
+	case .String, .Raw_String:
+		return unescape_string_prefix(r, val.data.str, limit), .OK
+	}
+	return "", .Type_Mismatch
+}
+
+@(require_results)
 read_int :: proc(r: ^Reader, key: string) -> (value: int, err: Error) {
 	i, e := read_i64(r, key)
 	return int(i), e
@@ -472,6 +489,17 @@ unescape_string :: proc(r: ^Reader, s: string) -> string {
 	return unescape_to(s, buf)
 }
 
+unescape_string_prefix :: proc(r: ^Reader, s: string, limit: int) -> string {
+	capped := min(len(s), max(limit, 0))
+	if capped == 0 {
+		return ""
+	}
+	if !has_escapes(s[:capped]) {
+		return s[:capped]
+	}
+	return unescape_to(s, scratch_alloc(r, capped))
+}
+
 unescape_string_temp :: proc(s: string) -> string {
 	if !has_escapes(s) {
 		return s
@@ -521,16 +549,18 @@ parse_int_key :: proc(
 }
 
 unescape_to :: proc(s: string, buf: []byte) -> string {
-	n := strings.index_byte(s, '\\')
+	limit := len(buf)
+	head := s[:min(len(s), limit)]
+	n := strings.index_byte(head, '\\')
 	if n < 0 {
-		return s
+		return head
 	}
 
 	copy(buf, s[:n])
 	out_pos := n
 	pos := n + 1
 
-	for pos < len(s) {
+	for pos < len(s) && out_pos < limit {
 		ch := s[pos]
 		pos += 1
 
@@ -561,17 +591,13 @@ unescape_to :: proc(s: string, buf: []byte) -> string {
 			out_pos += 1
 		case 'u':
 			if pos + 4 > len(s) {
-				buf[out_pos] = '\\'
-				buf[out_pos + 1] = 'u'
-				out_pos += 2
+				out_pos += copy(buf[out_pos:], "\\u")
 				continue
 			}
 			hex := s[pos:pos + 4]
 			codepoint, ok := parse_hex4(hex)
 			if !ok {
-				buf[out_pos] = '\\'
-				buf[out_pos + 1] = 'u'
-				out_pos += 2
+				out_pos += copy(buf[out_pos:], "\\u")
 				continue
 			}
 			pos += 4
@@ -583,8 +609,7 @@ unescape_to :: proc(s: string, buf: []byte) -> string {
 					if ok2 && low >= 0xDC00 && low <= 0xDFFF {
 						combined := 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)
 						encoded, width := utf8.encode_rune(rune(combined))
-						copy(buf[out_pos:], encoded[:width])
-						out_pos += width
+						out_pos += copy(buf[out_pos:], encoded[:width])
 						pos += 6
 						continue
 					}
@@ -592,22 +617,22 @@ unescape_to :: proc(s: string, buf: []byte) -> string {
 			}
 
 			encoded, width := utf8.encode_rune(rune(codepoint))
-			copy(buf[out_pos:], encoded[:width])
-			out_pos += width
+			out_pos += copy(buf[out_pos:], encoded[:width])
 		case:
-			buf[out_pos] = '\\'
-			buf[out_pos + 1] = ch
-			out_pos += 2
+			literal := [2]byte{'\\', ch}
+			out_pos += copy(buf[out_pos:], literal[:])
 		}
 
-		next_escape := strings.index_byte(s[pos:], '\\')
+		tail := s[pos:]
+		if len(tail) > limit - out_pos {
+			tail = tail[:limit - out_pos]
+		}
+		next_escape := strings.index_byte(tail, '\\')
 		if next_escape < 0 {
-			copy(buf[out_pos:], s[pos:])
-			out_pos += len(s) - pos
+			out_pos += copy(buf[out_pos:], tail)
 			break
 		}
-		copy(buf[out_pos:], s[pos:pos + next_escape])
-		out_pos += next_escape
+		out_pos += copy(buf[out_pos:], tail[:next_escape])
 		pos += next_escape + 1
 	}
 
@@ -889,6 +914,33 @@ read_string_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: st
 }
 
 @(require_results)
+read_string_prefix_elem :: proc(
+	r: ^Reader,
+	elem: Element,
+	field: string,
+	limit: int,
+) -> (
+	value: string,
+	err: Error,
+) {
+	if !reader_ready(r) {
+		return "", .Not_Parsed
+	}
+
+	val, found := get_by_path_from(&r.parser, element_index(r, elem), field)
+	if !found {
+		return "", .Key_Not_Found
+	}
+
+	#partial switch val.type {
+	case .String, .Raw_String:
+		return unescape_string_prefix(r, val.data.str, limit), .OK
+	}
+
+	return "", .Type_Mismatch
+}
+
+@(require_results)
 read_int_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: int, err: Error) {
 	i, e := read_i64_elem(r, elem, field)
 	return int(i), e
@@ -983,6 +1035,28 @@ read_string_value :: proc(r: ^Reader, elem: Element) -> (value: string, err: Err
 		return val.data.str, .OK
 	case .Raw_String:
 		return unescape_string(r, val.data.str), .OK
+	}
+
+	return "", .Type_Mismatch
+}
+
+@(require_results)
+read_string_prefix_value :: proc(
+	r: ^Reader,
+	elem: Element,
+	limit: int,
+) -> (
+	value: string,
+	err: Error,
+) {
+	if !reader_ready(r) {
+		return "", .Not_Parsed
+	}
+
+	val := r.parser.values[element_index(r, elem)]
+	#partial switch val.type {
+	case .String, .Raw_String:
+		return unescape_string_prefix(r, val.data.str, limit), .OK
 	}
 
 	return "", .Type_Mismatch
@@ -1097,8 +1171,8 @@ extract_raw_value :: proc(p: ^Parser_State, idx: u32) -> (string, Error) {
 		}
 		return input[start:end], .OK
 	case .String, .Raw_String:
-		end := scan_string_end(input, start)
-		if end < 0 {
+		end := start + len(val.data.str) + 2
+		if end > len(input) {
 			return "", .Invalid_JSON
 		}
 		return input[start:end], .OK

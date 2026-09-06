@@ -73,6 +73,18 @@ read_string_path :: proc(r: ^Reader, path: string) -> (value: string, err: Error
 }
 
 @(require_results)
+read_string_prefix_path :: proc(
+	r: ^Reader,
+	path: string,
+	limit: int,
+) -> (
+	value: string,
+	err: Error,
+) {
+	return oj.read_string_prefix(r, path, limit)
+}
+
+@(require_results)
 read_int_path :: proc(r: ^Reader, path: string) -> (value: int, err: Error) {
 	return oj.read_int(r, path)
 }
@@ -263,6 +275,19 @@ read_string_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: st
 }
 
 @(require_results)
+read_string_prefix_elem :: proc(
+	r: ^Reader,
+	elem: Element,
+	field: string,
+	limit: int,
+) -> (
+	value: string,
+	err: Error,
+) {
+	return oj.read_string_prefix_elem(r, elem, field, limit)
+}
+
+@(require_results)
 read_int_elem :: proc(r: ^Reader, elem: Element, field: string) -> (value: int, err: Error) {
 	return oj.read_int_elem(r, elem, field)
 }
@@ -295,6 +320,18 @@ read_string_value :: proc(r: ^Reader, elem: Element) -> (value: string, err: Err
 }
 
 @(require_results)
+read_string_prefix_value :: proc(
+	r: ^Reader,
+	elem: Element,
+	limit: int,
+) -> (
+	value: string,
+	err: Error,
+) {
+	return oj.read_string_prefix_value(r, elem, limit)
+}
+
+@(require_results)
 read_int_value :: proc(r: ^Reader, elem: Element) -> (value: int, err: Error) {
 	return oj.read_int_value(r, elem)
 }
@@ -323,6 +360,12 @@ read_string :: proc {
 	read_string_path,
 	read_string_elem,
 	read_string_value,
+}
+
+read_string_prefix :: proc {
+	read_string_prefix_path,
+	read_string_prefix_elem,
+	read_string_prefix_value,
 }
 
 read_int :: proc {
